@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>404 — The Descent</title>
+  <meta name="description" content="Page not found. Fall into the abyss, walk the labyrinth, return through the light." />
+  <link rel="stylesheet" href="/src/overlay.css" />
+</head>
+<body>
+  <canvas id="scene"></canvas>
+
+  <div id="overlay" aria-live="polite">
+    <div id="title-card" class="overlay-text" role="status">
+      <span>The page you wanted isn't here.</span>
+    </div>
+
+    <button id="skip-button" class="overlay-control" type="button" aria-label="Skip to homepage">
+      skip ↓
+    </button>
+
+    <div id="return-copy" class="overlay-text" role="status">
+      <span>Welcome back.</span>
+    </div>
+  </div>
+
+  <div id="iris-mask" aria-hidden="true"></div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

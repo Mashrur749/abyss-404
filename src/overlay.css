@@ -1,0 +1,203 @@
+/* ============================================================================
+   404 — The Descent — overlay presentation
+   Static presentation only. All motion/reveal timing lives in
+   src/ui/overlay-text.js via GSAP — this file never animates anything.
+   Typeface stack: a refined geometric sans (system-first, no default-UI feel)
+   paired with generous tracking and low default opacity, per CONCEPT.md's
+   "calm trance" tone (Sections 2 & 4) and ARCHITECTURE.md's contract for
+   this file.
+   ============================================================================ */
+
+:root {
+  --overlay-ink: #f4efe3;
+  --overlay-ink-dim: rgba(244, 239, 227, 0.72);
+  --overlay-void: #0a0a14;
+  --overlay-font-display:
+    'Cormorant Garamond', 'Times New Sonoma', Georgia, 'Iowan Old Style',
+    'Palatino Linotype', serif;
+  --overlay-font-control:
+    'Neue Montreal', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--overlay-void);
+  cursor: default;
+}
+
+/* --------------------------------------------------------------------------
+   #scene — fixed fullscreen canvas, sits beneath every overlay layer
+   -------------------------------------------------------------------------- */
+#scene {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: block;
+  z-index: 0;
+  background: var(--overlay-void);
+}
+
+/* --------------------------------------------------------------------------
+   #overlay — fullscreen non-interactive layer that hosts the 2D copy;
+   individual children opt back into pointer events as needed (#skip-button).
+   -------------------------------------------------------------------------- */
+#overlay {
+  position: fixed;
+  inset: 0;
+  /* Must sit ABOVE #iris-mask (z-index 30): the return copy ("Welcome back.")
+     assembles during the final 0.5s while the iris is actively closing, and
+     CONCEPT.md Section 2/4 requires that payoff line to read clearly through/
+     over the transition, not be swept away by the expanding mask beneath it. */
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  color: var(--overlay-ink);
+  text-align: center;
+  user-select: none;
+}
+
+/* --------------------------------------------------------------------------
+   #title-card — Act I / II copy: "The page you wanted isn't here."
+   Low default opacity, wide tracking, serif for a title-sequence quality.
+   Opacity/visibility is driven entirely by GSAP (overlay-text.js); this only
+   sets the resting visual character of the element.
+   -------------------------------------------------------------------------- */
+#title-card {
+  position: absolute;
+  top: 42%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(90vw, 42rem);
+  padding: 0 1.5rem;
+  font-family: var(--overlay-font-display);
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(1.35rem, 2.6vw, 2.35rem);
+  line-height: 1.5;
+  letter-spacing: 0.09em;
+  color: var(--overlay-ink);
+  opacity: 0;
+  text-shadow: 0 0 28px rgba(255, 179, 71, 0.18), 0 0 2px rgba(0, 0, 0, 0.4);
+}
+
+#title-card .split-char,
+#title-card .split-word {
+  display: inline-block;
+  will-change: transform, opacity;
+}
+
+/* --------------------------------------------------------------------------
+   #return-copy — Act III / iris copy: "Welcome back."
+   Sits slightly lower and calmer, warmer tone to match the overflow palette.
+   -------------------------------------------------------------------------- */
+#return-copy {
+  position: absolute;
+  top: 58%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(90vw, 36rem);
+  padding: 0 1.5rem;
+  font-family: var(--overlay-font-display);
+  font-weight: 400;
+  font-style: normal;
+  font-size: clamp(1.1rem, 2.1vw, 1.75rem);
+  line-height: 1.6;
+  letter-spacing: 0.14em;
+  color: #241a08;
+  opacity: 0;
+  text-shadow: 0 0 20px rgba(255, 244, 214, 0.5);
+}
+
+#return-copy .split-char,
+#return-copy .split-word {
+  display: inline-block;
+  will-change: transform, opacity;
+}
+
+/* --------------------------------------------------------------------------
+   #skip-button — unobtrusive corner affordance, invisible until
+   SKIP_AFFORDANCE_DELAY has elapsed (enforced in JS, not here).
+   -------------------------------------------------------------------------- */
+#skip-button {
+  position: absolute;
+  right: clamp(1.25rem, 4vw, 3rem);
+  bottom: clamp(1.25rem, 4vw, 3rem);
+  z-index: 1;
+  pointer-events: auto;
+  cursor: pointer;
+  appearance: none;
+  border: 1px solid rgba(244, 239, 227, 0.28);
+  border-radius: 999px;
+  background: rgba(10, 10, 20, 0.28);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 0.55em 1.3em;
+  font-family: var(--overlay-font-control);
+  font-weight: 400;
+  font-size: 0.72rem;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  color: var(--overlay-ink-dim);
+  opacity: 0;
+  transition: border-color 0.4s ease, color 0.4s ease, background-color 0.4s ease;
+}
+
+#skip-button:hover,
+#skip-button:focus-visible {
+  border-color: rgba(255, 179, 71, 0.55);
+  color: var(--overlay-ink);
+  background: rgba(10, 10, 20, 0.45);
+}
+
+#skip-button:focus-visible {
+  outline: 1px solid rgba(255, 179, 71, 0.7);
+  outline-offset: 3px;
+}
+
+/* --------------------------------------------------------------------------
+   #iris-mask — fullscreen radial iris used for the final reveal transition.
+   The circle's radius (as a clip-path percentage) is driven every frame by
+   overlay-text.js from state.iris.radius; this file only sets the static
+   visual identity (color, layering, base clip-path shape).
+   -------------------------------------------------------------------------- */
+#iris-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  /* CONCEPT.md Section 4/8: the final frame before the reveal must be a "pure warm
+     whiteout, slightly overexposed" — the residual feeling the user carries into the
+     homepage. The clip-path circle only ever GROWS from center outward as it closes
+     (state.iris.radius: 1 -> 0), so the color revealed LAST is whatever sits at this
+     gradient's outer edge. Keeping the outer stop warm (not a dark void) ensures the
+     close-transition ends on warm overexposure rather than reverting to darkness. */
+  background: radial-gradient(
+    circle at 50% 50%,
+    #fff4d6 0%,
+    #f6e2ad 55%,
+    #fff4d6 100%
+  );
+  /* Resting/default state = mask clipped away to nothing (scene fully visible),
+     matching state.iris.radius's default of 1 ("fully open onto the scene").
+     JS (overlay-text.js) only expands this toward full coverage in the final
+     "iris" beat. */
+  clip-path: circle(0% at 50% 50%);
+}

@@ -1,0 +1,23 @@
+{
+  "name": "404-abyss",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cinematic 3D 404 page: fall into a labyrinth of the abyss, walk the trance, return through overflowing light.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "three": "^0.169.0",
+    "gsap": "^3.12.5",
+    "troika-three-text": "^0.52.4",
+    "postprocessing": "^6.36.4",
+    "simplex-noise": "^4.0.3",
+    "tone": "^15.0.4"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10"
+  }
+}
