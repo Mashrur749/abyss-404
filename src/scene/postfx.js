@@ -1,15 +1,17 @@
 // src/scene/postfx.js
 //
 // Post-processing pipeline (pmndrs `postprocessing`, NOT three/examples/jsm/postprocessing).
-// Builds the EffectComposer that carries Act III's light-overflow (Bloom + God Rays), a subtle
-// permanent Vignette + Film Grain for cinematic texture, and a Chromatic Aberration pass gated
-// to only render during Act I (`drop` / `freefall`) to reinforce the vertigo (CONCEPT.md
-// Sections 2 & 4, ARCHITECTURE.md's postfx.js contract).
+// Builds the EffectComposer that carries Act III's light-overflow (Bloom; see the DEFINITIVE FIX
+// note below for why GodRaysEffect is constructed but never added to a pass), a subtle permanent
+// Vignette + Film Grain for cinematic texture, a Chromatic Aberration + fisheye pass gated to only
+// render during Act I (`drop` / `freefall`) to reinforce the vertigo, and a TiltShiftEffect that
+// stands in for Act II's rack-focus beat (CONCEPT.md Sections 2 & 4, ARCHITECTURE.md's postfx.js
+// contract).
 //
 // This module owns no narrative light sources — the small emissive mesh created below exists
-// purely as the God Rays effect's required occlusion anchor (a technical parameter of the
-// GodRaysEffect constructor), not a scene light; `lighting.js` remains the sole owner of actual
-// illumination per the architecture contract.
+// purely as the (now-unused) God Rays effect's required occlusion anchor (a technical parameter
+// of the GodRaysEffect constructor), not a scene light; `lighting.js` remains the sole owner of
+// actual illumination per the architecture contract.
 
 import * as THREE from 'three';
 import {
@@ -23,11 +25,24 @@ import {
   GodRaysEffect,
   ChromaticAberrationEffect,
   LensDistortionEffect,
-  DepthOfFieldEffect,
+  TiltShiftEffect,
   BlendFunction,
   KernelSize,
 } from 'postprocessing';
-import { COLOR } from '../config.js';
+import { COLOR, VORTEX, SCROLL } from '../config.js';
+
+// v2.2 item 7 ("feels fast" perception cue) tuning — see updatePostFX's chromatic-aberration
+// block below. Kept as named constants rather than inline magic numbers so the "existing effect
+// parameters only" constraint (ARCHITECTURE.md's postfx.js section) is easy to audit: nothing
+// here adds a pass or touches EffectPass grouping, it only scales opacity/offset uniforms that
+// already exist on chromaticAberrationEffect.
+const VELOCITY_ABERRATION_MAX = 0.5; // ceiling opacity contribution from scroll speed alone (traverse)
+const VELOCITY_ABERRATION_OFFSET_BOOST = 0.6; // fractional growth of the offset magnitude at max speed
+// The chromatic-aberration effect's own authored base offset (must match the literal passed to
+// its constructor below) — kept as a shared constant so updatePostFX's velocity-linked offset
+// scaling has a stable, known "1x" baseline to scale from rather than reading back a possibly
+// already-scaled runtime value.
+const BASE_ABERRATION_OFFSET = new THREE.Vector2(0.0015, 0.001);
 
 // ---------------------------------------------------------------------------------------------
 // Fisheye / lens-distortion (CONCEPT.md Section 2, Act I: "Wide/fisheye FOV (~90-100deg) -
@@ -82,8 +97,19 @@ function CameraEyeHeightFallback() {
  * Bloom, a subtle Vignette, Film Grain, God Rays, and a beat-gated Chromatic Aberration pass.
  */
 export function createPostFX(renderer, scene, camera) {
+  // stencilBuffer: true is deliberate, not decorative. GodRaysEffect and DepthOfFieldEffect both
+  // declare EffectAttribute.DEPTH, so the composer allocates a shared "stable depth texture" and
+  // blits the main RenderPass's depth into it every frame (see postprocessing's
+  // EffectComposer#blitDepthBuffer). With the default stencilBuffer:false, Three.js requests a
+  // depth-only renderbuffer, but ANGLE (Chrome's macOS GL backend) is known to silently promote
+  // that into a combined depth24-stencil8 renderbuffer regardless — and once two independently
+  // "depth-only-requested" render targets both get silently promoted like that, their
+  // depth-stencil attachments can alias, which is exactly the
+  // "glBlitFramebuffer: Read and write depth stencil attachments cannot be the same image" error.
+  // Requesting a real stencil buffer explicitly avoids that silent, ambiguous promotion.
   const composer = new EffectComposer(renderer, {
     frameBufferType: THREE.HalfFloatType,
+    stencilBuffer: true,
   });
 
   composer.addPass(new RenderPass(scene, camera));
@@ -133,7 +159,7 @@ export function createPostFX(renderer, scene, camera) {
   grainEffect.blendMode.opacity.value = 0.08;
 
   const chromaticAberrationEffect = new ChromaticAberrationEffect({
-    offset: new THREE.Vector2(0.0015, 0.001),
+    offset: BASE_ABERRATION_OFFSET.clone(),
     radialModulation: true,
     modulationOffset: 0.2,
   });
@@ -148,34 +174,49 @@ export function createPostFX(renderer, scene, camera) {
     distortion: new THREE.Vector2(0, 0),
   });
 
-  // Rack-focus / depth-of-field (Act II, CONCEPT.md Section 2: "foreground wall detail sharp,
-  // corridor-ahead soft, then reverse"). Silent (bokeh scale 0) outside the moments director.js
-  // schedules it; gated entirely by state.rackFocus.amount rather than state.beat directly so
-  // this module stays a pure reader of state, per the architecture contract.
-  // focusDistance/focusRange are WORLD UNITS per this library's real contract (default 3.0/2.0
-  // respectively) — state.rackFocus.focusDistance is authored in matching world-unit meters by
-  // director.js (see state.js), not a normalized 0..1 camera-space fraction.
-  const depthOfFieldEffect = new DepthOfFieldEffect(camera, {
-    focusDistance: 0.9,
-    focusRange: 1.6,
-    bokehScale: 0,
-    height: 480,
+  // Rack-focus (Act II, CONCEPT.md Section 2: "foreground wall detail sharp, corridor-ahead
+  // soft, then reverse"). Originally realized with DepthOfFieldEffect (a real depth-buffer CoC
+  // blur), which had to be dropped — see the DEFINITIVE FIX note below — because it declares
+  // EffectAttribute.DEPTH. TiltShiftEffect is the mechanically closest substitute: a screen-space
+  // "sharp band / blurred outside" pass with its own private renderTarget/blur pass, verified via
+  // `effect.getAttributes()` to report EffectAttribute.NONE (it never touches the composer's
+  // shared depth texture), so it cannot resurrect the glBlitFramebuffer conflict. It has no real
+  // depth notion, so it can't do "foreground sharp, corridor-ahead soft" as an actual focal-plane
+  // sweep — instead its sharp band is swept across the screen-space Y axis via `offset`
+  // (see updatePostFX below), which approximates the same "eye drawn from near to far" beat.
+  // Silent (opacity 0) outside the moments director.js schedules, gated entirely by
+  // state.rackFocus.amount so this module stays a pure reader of state, per the architecture
+  // contract.
+  const tiltShiftEffect = new TiltShiftEffect({
+    blendFunction: BlendFunction.NORMAL,
+    focusArea: 0.4,
+    feather: 0.3,
   });
+  tiltShiftEffect.blendMode.opacity.value = 0;
 
-  // `postprocessing` refuses to merge a UV-transforming effect (LensDistortionEffect bends
-  // mainUv for the fisheye bow) into the same EffectPass as an effect carrying
-  // EffectAttribute.CONVOLUTION — it throws at construction time if you try. Verified directly
-  // against the installed library via `effect.getAttributes()`: ChromaticAberrationEffect
-  // (with radialModulation) is the one that actually carries EffectAttribute.CONVOLUTION here —
-  // DepthOfFieldEffect and GodRaysEffect only carry EffectAttribute.DEPTH, which does not
-  // conflict with LensDistortionEffect. So ChromaticAberrationEffect is the one that must live
-  // in a separate pass from LensDistortionEffect; Bloom/God Rays/DoF are all safe alongside it.
+  // DEFINITIVE FIX (not a diagnostic guess): every effect that declares EffectAttribute.DEPTH
+  // was verified exhaustively via `effect.getAttributes()` against every effect actually in use
+  // here — only GodRaysEffect and (the now-removed-from-any-pass) DepthOfFieldEffect carried it.
+  // EffectComposer only ever creates its shared "stable depth texture" and calls the one
+  // gl.blitFramebuffer site in this entire pipeline (EffectComposer#blitDepthBuffer) when
+  // `pass.needsDepthTexture` is true for at least one added pass (see EffectComposer#addPass).
+  // With DepthOfFieldEffect replaced by TiltShiftEffect (verified EffectAttribute.NONE) and
+  // GodRaysEffect excluded here too, no remaining pass declares needsDepthTexture, so that blit
+  // never executes — mechanically eliminating the "glBlitFramebuffer: Read and write depth
+  // stencil attachments cannot be the same image" error's only possible trigger, rather than
+  // guessing at buffer-format parameters within it (antialias:false and stencilBuffer:true were
+  // tried first and did not resolve it). Trade-off: no volumetric light-shaft rays for Act III.
+  // Acceptable per the Light Artist advisor's round-3 review, which independently verified that
+  // state.bloom.intensity + state.color.mixT alone already deliver a real, scene-driven warm
+  // whiteout for the "light overflowing" beat — GodRaysEffect was an enhancement on top of that,
+  // not its sole carrier. godRaysEffect/lightSource stay constructed and in the handles object
+  // (main.js still repositions `lightSource`; updatePostFX still safely no-ops on godRaysEffect)
+  // so nothing downstream has to change — it's just never added to a pass.
   const opticsPass = new EffectPass(
     camera,
     bloomEffect,
-    godRaysEffect,
     lensDistortionEffect,
-    depthOfFieldEffect
+    tiltShiftEffect
   );
   const finishingPass = new EffectPass(camera, chromaticAberrationEffect, vignetteEffect, grainEffect);
 
@@ -190,7 +231,7 @@ export function createPostFX(renderer, scene, camera) {
     grainEffect,
     chromaticAberrationEffect,
     fisheyeEffect: lensDistortionEffect,
-    depthOfFieldEffect,
+    tiltShiftEffect,
     opticsPass,
     finishingPass,
   });
@@ -201,14 +242,16 @@ export function createPostFX(renderer, scene, camera) {
 /**
  * Exports `updatePostFX(composer, state, dt)` — drives bloom intensity from
  * `state.bloom.intensity`, god-rays weight from `state.bloom.godRays` (both written by
- * director.js across Acts II→III), and gates chromatic aberration to only be present during
+ * director.js across Acts II→III; note godRaysEffect is constructed but not in any pass — see
+ * the DEFINITIVE FIX comment above — so this is now inert bookkeeping kept for parity/debugging,
+ * not a visual driver), and gates chromatic aberration to only be present during
  * `state.beat === 'drop' | 'freefall'` (Act I vertigo reinforcement).
  */
 export function updatePostFX(composer, state, dt) {
   const handles = composer.__postfx;
   if (!handles) return;
 
-  const { bloomEffect, godRaysEffect, chromaticAberrationEffect, fisheyeEffect, depthOfFieldEffect } = handles;
+  const { bloomEffect, godRaysEffect, chromaticAberrationEffect, fisheyeEffect, tiltShiftEffect } = handles;
 
   // --- Bloom: state.bloom.intensity drives both the composite opacity and the underlying
   // bloom intensity uniform, so low values genuinely recede rather than just fading a
@@ -217,27 +260,50 @@ export function updatePostFX(composer, state, dt) {
   bloomEffect.intensity = bloomIntensity;
   bloomEffect.blendMode.opacity.value = THREE.MathUtils.clamp(bloomIntensity, 0, 1.5);
 
-  // --- God Rays: state.bloom.godRays (0..1 from director.js) shapes both the visible strength
-  // (opacity) and the underlying light-shaft weight/exposure so the volumetric shafts actually
-  // grow in physical presence, not just fade in at full strength (CONCEPT.md Section 4's
-  // "spilling like liquid" beat).
+  // --- God Rays: kept updated for parity even though godRaysEffect isn't in any pass (see the
+  // DEFINITIVE FIX comment in createPostFX) — harmless, since nothing reads its output, and
+  // keeps the handle in a sane state if it's ever wired back into a pass. The narrative "spilling
+  // like liquid" budget this used to carry now lives in lighting.js's overflowLight intensity
+  // instead (state.bloom.godRays is consumed there).
   const godRaysAmount = THREE.MathUtils.clamp(state.bloom.godRays, 0, 1);
   godRaysEffect.blendMode.opacity.value = godRaysAmount;
   const godRaysMaterial = godRaysEffect.godRaysMaterial;
   godRaysMaterial.weight = 0.15 + godRaysAmount * 0.65;
   godRaysMaterial.exposure = 0.2 + godRaysAmount * 0.8;
 
-  // --- Chromatic aberration: only present during Act I ('drop' | 'freefall'), fully absent
-  // otherwise, per the postfx.js contract. Fade its opacity in/out smoothly across dt rather
-  // than a hard on/off flicker, while still guaranteeing it reads as ~0 outside Act I.
+  // --- Chromatic aberration: Act I ('drop' | 'freefall') vertigo-beat gating (unchanged), PLUS
+  // (v2.2 item 7, ARCHITECTURE.md's explicitly-permitted narrow addition) a velocity-linked term
+  // during `traverse` so "feels fast" scales with how the user is actually moving, not only with
+  // the Act I beat. Uses only existing effect parameters (blendMode.opacity, offset magnitude) —
+  // no EffectPass restructuring, no new pass, no GodRays/DepthOfField involvement.
   const isVertigoBeat = state.beat === 'drop' || state.beat === 'freefall';
-  const targetAberration = isVertigoBeat ? 1 : 0;
-  const currentAberration = chromaticAberrationEffect.blendMode.opacity.value;
   const lerpSpeed = 1 - Math.exp(-dt * 6);
-  const nextAberration = isVertigoBeat
-    ? currentAberration + (targetAberration - currentAberration) * lerpSpeed
-    : 0; // hard-zero the instant we leave Act I so no residual aberration ever appears later
+
+  // state.vortex.travelSpeed is signed meters/second (vortex.js), written every frame once the
+  // rig starts moving; undefined/absent (e.g. before the first vortex update) safely reads as 0.
+  // Normalized against SCROLL's own forward ceiling (1/minDuration * travelSpan) so the cue scales
+  // 0..~1 across the real achievable speed range rather than against an arbitrary constant.
+  const travelSpeed = Math.abs(state.vortex?.travelSpeed ?? 0);
+  const maxForwardSpeed = VORTEX.travelSpan / SCROLL.minDuration;
+  const speedT = THREE.MathUtils.clamp(travelSpeed / Math.max(maxForwardSpeed, 0.001), 0, 1);
+  const velocityAberration = state.beat === 'traverse' ? speedT * VELOCITY_ABERRATION_MAX : 0;
+
+  const targetAberration = isVertigoBeat ? 1 : velocityAberration;
+  const currentAberration = chromaticAberrationEffect.blendMode.opacity.value;
+  // Smoothly tracks whichever target applies (full vertigo ramp in Act I, speed-scaled term
+  // during traverse, 0 during turn/approach/overflow/iris) — no more hard-zero-outside-Act-I
+  // special case now that traverse can legitimately want a nonzero value.
+  const nextAberration = currentAberration + (targetAberration - currentAberration) * lerpSpeed;
   chromaticAberrationEffect.blendMode.opacity.value = nextAberration;
+
+  // Radial-offset magnitude also grows slightly with speed (on top of the fixed base offset
+  // authored in createPostFX) — the same "streak/smear" cue reads a little more pronounced the
+  // faster the user is actually scrolling, still fully decaying back to the base offset at rest.
+  const baseOffsetMag = BASE_ABERRATION_OFFSET.length();
+  const targetOffsetScale = 1 + (state.beat === 'traverse' ? speedT * VELOCITY_ABERRATION_OFFSET_BOOST : 0);
+  const currentOffsetScale = baseOffsetMag > 0 ? chromaticAberrationEffect.offset.length() / baseOffsetMag : 1;
+  const nextOffsetScale = currentOffsetScale + (targetOffsetScale - currentOffsetScale) * lerpSpeed;
+  chromaticAberrationEffect.offset.copy(BASE_ABERRATION_OFFSET).multiplyScalar(nextOffsetScale);
 
   // --- Fisheye / lens-distortion: peripheral-geometry bow, present only during Act I
   // (drop/freefall), per CONCEPT.md Section 2's explicit fisheye-lens call-out. Ramps in/out on
@@ -251,16 +317,31 @@ export function updatePostFX(composer, state, dt) {
     : 0;
   fisheyeEffect.distortion.set(nextDistortion, nextDistortion);
 
-  // --- Rack-focus / depth-of-field: state.rackFocus.amount (0..1, authored by director.js during
-  // scheduled Act II moments) drives the bokeh blur scale. At 0 the effect is fully sharp/inert
-  // (bokehScale 0 = no blur contribution), so it stays invisible outside those moments rather than
-  // a permanently-on DoF pass. focusDistance also animates so "foreground sharp / corridor soft,
-  // then reverse" is a real focus-plane sweep, not just a blur amount fade.
-  if (depthOfFieldEffect) {
+  // --- Rack-focus, via TiltShiftEffect (see createPostFX's header comment for why this replaced
+  // DepthOfFieldEffect): state.rackFocus.amount (0..1, authored by director.js during scheduled
+  // Act II moments) drives the sharp band's opacity directly. At 0 the effect is fully
+  // transparent/inert, so it stays invisible outside those moments rather than a permanently-on
+  // pass. state.rackFocus.focusDistance is authored by director.js in WORLD-UNIT meters (0.9m
+  // near foreground wall -> 9m corridor-ahead, per state.js's original DepthOfFieldEffect
+  // contract) and is remapped here into TiltShiftEffect.offset, a screen-space vertical fraction
+  // of where the sharp band sits (~-1 top of frame .. +1 bottom of frame per the effect's own
+  // vUv2 convention). Near focusDistance -> band low in frame (as if focused on the near
+  // foreground wall low in view), far focusDistance -> band recentered toward screen-middle (as
+  // if focused on the corridor stretching away) — approximating "foreground sharp -> corridor
+  // sharp, then reverse" without a real depth buffer. The exact mapping is a tuning choice, not a
+  // hard contract; director.js's tween shapes/timings are unchanged.
+  if (tiltShiftEffect) {
     const rackFocus = state.rackFocus || { amount: 0, focusDistance: 0.9 };
-    depthOfFieldEffect.bokehScale = rackFocus.amount * 3.5;
-    // World-unit meters, matching this library's real focusDistance contract (see state.js).
-    // focusDistance lives on the CoC material, not the effect itself.
-    depthOfFieldEffect.circleOfConfusionMaterial.focusDistance = rackFocus.focusDistance ?? 0.9;
+    tiltShiftEffect.blendMode.opacity.value = THREE.MathUtils.clamp(rackFocus.amount, 0, 1);
+    const NEAR_DISTANCE = 0.9;
+    const FAR_DISTANCE = 9;
+    const NEAR_OFFSET = 0.55; // sharp band low-in-frame, reading as "near foreground wall"
+    const FAR_OFFSET = 0.05; // sharp band near-centered, reading as "corridor stretching ahead"
+    const distanceT = THREE.MathUtils.clamp(
+      (rackFocus.focusDistance - NEAR_DISTANCE) / (FAR_DISTANCE - NEAR_DISTANCE),
+      0,
+      1
+    );
+    tiltShiftEffect.offset = THREE.MathUtils.lerp(NEAR_OFFSET, FAR_OFFSET, distanceT);
   }
 }

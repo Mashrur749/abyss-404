@@ -1,49 +1,105 @@
 // src/director.js
 //
-// The master choreography. This is the ONLY module that turns the authored
-// BEATS/EASE/COLOR/PULSE constants (config.js) and the beat-sheet in CONCEPT.md
-// Section 7 into concrete tweened values written onto `state`. Every other
-// module reads those state fields and applies them to the Three.js objects /
-// DOM elements it owns — director.js never touches a THREE.* object or the
-// DOM itself, per the ARCHITECTURE.md contract.
+// The master choreography — v2.1 retune for the void/particle-vortex pivot's three-phase timing
+// model (see ARCHITECTURE.md's "three-phase timing model" section). v1 had one global GSAP
+// timeline scrubbed by one global clockTime. v2 cannot do that anymore because the traverse
+// (Act II) phase has no fixed duration — it's scroll-paced (scroll.js owns
+// state.traverse.progress) — so a single absolute-time timeline can no longer address the whole
+// piece. This file now owns THREE separate things instead of one:
 //
-// Fields owned (write) here: state.camera.fov, state.camera.rollDeg,
-// state.camera.dutchTiltDeg, state.color.mixT, state.bloom.intensity,
-// state.bloom.godRays, state.pulse.bpm, state.overlay.*, state.iris.radius.
+//   1. `fallInTimeline` — a GSAP timeline scrubbed by `state.clockTime` (drop/freefall/catch,
+//      fixed ~3.2s total, BEATS.catch.end, v2.1: roughly halved from v2's ~6.8s and with no more
+//      opening silhouette hold — motion starts at t=0). Same mechanism as v1's timeline, just
+//      truncated to fall-in's span instead of covering the whole piece.
+//   2. Traverse-cosmetic tweens/functions — NOT a GSAP timeline scrubbed against a clock, because
+//      there is no clock to scrub against during this phase (scroll.js/vortex.js own camera
+//      position directly off state.traverse.progress). Instead this module exposes
+//      `updateTraverseCosmetics(state, dt)`, called every frame while state.beat === 'traverse',
+//      which authors state.pulse.bpm (decelerating 70->50 off state.traverse.elapsedSeconds,
+//      clamped against SCROLL.pulseReferenceDuration — explicitly NOT off progress or any
+//      clockTime, per CONCEPT.md v2 Section 4 / ARCHITECTURE.md's lighting.js section) plus
+//      one-shot-scheduled rackFocus/turnCue sub-tweens (re-keyed off elapsedSeconds instead of
+//      absolute clockTime, same shapes as v1's scheduling logic).
+//   3. `returnTimeline` — a GSAP timeline scrubbed by `state.actIII.clockTime` (turn/approach/
+//      overflow/iris, fixed RETURN_TOTAL_DURATION = 5.5s, v2.2: halved from v2.1's 12s per
+//      playtest feedback "the ending screen is too much dragged"), covering the exact same fields
+//      v1's tail-end did (camera.fov ease-out, color.mixT teal->gold pivot, bloom.* ramps,
+//      iris.radius close, overlay opacity for the return-copy). Every internal tween below is
+//      keyed off BEATS.<beat>.duration directly (or a Math.min-guarded fraction of it), so it
+//      scales automatically with whatever RETURN_TOTAL_DURATION config.js authors — nothing here
+//      hardcodes an absolute duration that could overrun its beat's shorter v2.2 span.
 //
-// (camera.rollDeg/dutchTiltDeg aren't named in the file's "owns" list in the
-// prose of ARCHITECTURE.md's director.js section, but they are BEATS/EASE-
-// driven camera values exactly like fov, they live under state.camera, and
-// camera.js's own docs explicitly say it only *reads* state.camera.rollDeg/
-// dutchTiltDeg and applies it to camera.rotation.z — something has to author
-// them on the beat timeline, and director.js is the only module chartered to
-// turn beat-sheet timing into eased state values. See "Deviations" in the
-// handoff notes for the reasoning.)
+// Fields owned (write) here, same as v1's contract, split across the three responsibilities
+// above: state.camera.fov, state.camera.rollDeg, state.camera.bankDeg, state.color.mixT,
+// state.bloom.intensity, state.bloom.godRays, state.pulse.bpm, state.overlay.*, state.iris.radius,
+// state.rackFocus.*, state.turnCue.amount.
+//
+// director.js never touches a THREE.* object or the DOM itself — every other module reads the
+// state fields above and applies them to the Three.js objects / DOM elements it owns, per the
+// ARCHITECTURE.md contract. It also never touches state.traverse.progress/complete (scroll.js's
+// exclusive territory) or state.clockTime/state.actIII.clockTime themselves (main.js's exclusive
+// territory — this module only ever scrubs its own timelines' local playheads against those
+// clocks; it never writes to them).
 
 import gsap from 'gsap';
 import {
   BEATS,
-  TOTAL_DURATION,
+  RETURN_TOTAL_DURATION,
   CAMERA,
   COLOR,
   PULSE,
+  SCROLL,
   EASE,
+  VORTEX,
 } from './config.js';
-import { getTurnCurveParams, labTToClockTime } from './scene/corridor.js';
+
+// The vortex's spiral twist is a single, constant-signed rotation for the entire piece
+// (VORTEX.vortexTwistRate, a plain config scalar — not a Three.js object, so reading it here
+// doesn't cross director.js's "never touch Three.js objects" boundary). Bank direction should
+// consistently roll INTO that one twist direction rather than alternate arbitrarily, so the bank
+// has a real geometric referent in the field it's supposedly banking into (CONCEPT.md v2 Section
+// 2: "rolling into the vortex's spiral curve"). Sign convention matches vortex.js's own
+// effectiveAngle math (positive twist = counter-clockwise in the camera's XY plane as seen from
+// behind), so a positive bankDeg here always reads as leaning into the same rotational sense the
+// streak field is actually spiraling in.
+const VORTEX_TWIST_SIGN = Math.sign(VORTEX.vortexTwistRate) || 1;
 
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
 
-// THREE.Color isn't imported here (director.js must not touch Three.js
-// objects), so color mixing for anything other than state.color.mixT itself
-// is left to the modules that own the renderable objects (lighting.js,
-// corridor.js fog, postfx.js). Director only ever writes the single scalar
-// mixT — the 0..1 knob CONCEPT.md Section 4 calls "the only hard color pivot."
+// THREE.Color isn't imported here (director.js must not touch Three.js objects), so color mixing
+// for anything other than state.color.mixT itself is left to the modules that own the renderable
+// objects (lighting.js, vortex.js material uniforms, postfx.js). Director only ever writes the
+// single scalar mixT — the 0..1 knob CONCEPT.md Section 4 calls "the only hard color pivot."
 
-function beatDuration(name) {
+function fallInBeatDuration(name) {
   const b = BEATS[name];
   return b.end - b.start;
+}
+
+// v2.14 FIX — feedback: "the last screen, where it's centering in ... jumps at the end of the
+// tunnel to get to the center." Root cause (found via direct measurement of the built GSAP
+// timeline, not guessed): state.camera.fov's two return-phase tweens (the 'approach' widen and the
+// 'overflow' settle-back) both use a plain EASE.overflow ('power2.out') restarted at t=0 for their
+// own beat — but power2.out has a NON-zero derivative at t=0 (same class of bug
+// getCameraRigPosition's own approach-tail rampIn fix already found and fixed for camera POSITION
+// in this exact same span — see this file's return-phase comments referencing that fix). Measured
+// directly: FOV velocity jumps instantly from 0deg/s to +13.6deg/s the instant 'approach' begins,
+// and from 0deg/s to -17.1deg/s the instant 'overflow' begins — both real, audible-as-a-visual-snap
+// discontinuities, since FOV directly IS the "zooming toward center" sensation the feedback
+// describes. Fixed the same way as the position fix: multiply the base ease by a fast
+// zero-derivative-at-0 ramp over each tween's own first 15%, forcing velocity to start at zero and
+// rise smoothly into the same power2.out shape — verified this brings both boundary velocities
+// from 13.6/-17.1 down to ~0 while leaving every authored endpoint value (70deg at end of approach,
+// 62deg at the very end) exactly unchanged.
+function zeroVelocityRamp(baseEaseName, rampFraction = 0.15) {
+  const baseEaseFn = gsap.parseEase(baseEaseName);
+  return (t) => {
+    const base = baseEaseFn(t);
+    const rampIn = Math.min(1, t / rampFraction);
+    return base * rampIn * rampIn;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -51,422 +107,470 @@ function beatDuration(name) {
 // ---------------------------------------------------------------------------
 
 export function createDirector(state) {
-  // A paused root timeline driven by absolute time (seconds) so it can be
-  // scrubbed directly against state.clockTime (main.js's authoritative
-  // clock) as well as played normally. We never let this timeline run its
-  // own independent RAF-driven playback that could drift from state.clockTime;
-  // main.js ticks it by calling timeline.time(state.clockTime) or by letting
-  // gsap.ticker drive it while clockTime is derived from the same wall clock —
-  // either way, .seek()/.time() below keeps it authoritative and scrubbable
-  // (required for skipToEnd() and for scrub-perfect sync with updateBeat()).
-  const timeline = gsap.timeline({
+  // ===========================================================================================
+  // 1. fallInTimeline — scrubbed by state.clockTime, covers drop/freefall/catch.
+  // Fixed ~3.2s duration (BEATS.catch.end). A paused root timeline driven by absolute time
+  // (seconds) so it can be scrubbed directly against state.clockTime (main.js's authoritative
+  // fall-in clock), exactly like v1's single timeline was, just truncated to this phase's span.
+  // ===========================================================================================
+  const fallInTimeline = gsap.timeline({
     paused: true,
     defaults: { overwrite: 'auto' },
   });
 
-  // Initial state at t=0 ("0. Trigger" — cut straight to void, no control,
-  // near-black, minimal falloff). Setting these explicitly (rather than
-  // relying on state.js's own initial values) means the timeline is the
-  // single source of truth for every value it owns, even at rest.
-  timeline.set(state.camera, { fov: CAMERA.fov.fall, rollDeg: 0, dutchTiltDeg: 0 }, 0);
-  timeline.set(state.color, { mixT: 0 }, 0);
-  timeline.set(state.bloom, { intensity: 0.3, godRays: 0 }, 0);
-  timeline.set(state.pulse, { bpm: PULSE.bpmStart }, 0);
-  timeline.set(state.overlay, { skipOpacity: 0, titleOpacity: 0, returnCopyOpacity: 0 }, 0);
-  timeline.set(state.iris, { radius: 1 }, 0);
-  timeline.set(state.rackFocus, { amount: 0, focusDistance: 0.9 }, 0);
-  timeline.set(state.turnCue, { amount: 0 }, 0);
+  // Initial state at t=0 ("The Drop" — v2.1 has no held opening shot; first-person motion and the
+  // Guiding Orb are both already live in the very first frame, per CONCEPT.md Section 0/2's
+  // "no held establishing shot" revision). Setting these explicitly (rather than relying on
+  // state.js's own initial values) means the timeline is the single source of truth for every
+  // value it owns, even at rest — includes fields the returnTimeline will later take over
+  // (bloom/color/iris/overlay), seeded here to fall-in's resting values so there's no undefined
+  // gap before returnTimeline starts writing them much later.
+  // fov seeds at CAMERA.fov.fall (not traverse's narrower resting value) since BEATS.drop.start
+  // is now 0 — there is no pre-drop hold for a narrower composed shot to occupy; the fisheye/
+  // vertigo lens is live from the very first frame the drop tween below ramps toward it anyway.
+  fallInTimeline.set(state.camera, { fov: CAMERA.fov.fall, rollDeg: 0, bankDeg: 0 }, 0);
+  fallInTimeline.set(state.color, { mixT: 0 }, 0);
+  fallInTimeline.set(state.bloom, { intensity: 0.3, godRays: 0 }, 0);
+  fallInTimeline.set(state.pulse, { bpm: PULSE.bpmStart }, 0);
+  fallInTimeline.set(state.overlay, { skipOpacity: 0, titleOpacity: 0, returnCopyOpacity: 0 }, 0);
+  fallInTimeline.set(state.iris, { radius: 1 }, 0);
+  fallInTimeline.set(state.rackFocus, { amount: 0, focusDistance: 0.9 }, 0);
+  fallInTimeline.set(state.turnCue, { amount: 0 }, 0);
 
   // -------------------------------------------------------------------------
-  // Beat 1 — The Drop (0 -> 1s)
-  // Sharp ease-in fall, fisheye FOV already maxed (holds at fall FOV — the
-  // "taking over" feeling is the roll/shake, not a FOV ramp, per Concept
-  // Section 2/3: FOV stays wide/fisheye through the whole fall until "catch").
-  // 2-4 deg uncommanded roll kicks in immediately and hard (EASE.drop =
-  // power4.in), front-loaded intensity per the kinetic lens.
+  // Beat 1 — The Drop (0 -> 0.6s per BEATS.drop)
+  // Sharp ease-in fall, fisheye FOV already maxed (holds at fall FOV — the "taking over" feeling
+  // is the roll/shake, not a FOV ramp, per Concept Section 2/3: FOV stays wide/fisheye through the
+  // whole fall until "catch"). 2-4 deg uncommanded roll kicks in immediately and hard
+  // (EASE.drop = power4.in), front-loaded intensity per the kinetic lens. Motion begins at t=0 —
+  // no held opening shot precedes this (v2.1: the silhouette beat is removed entirely).
   // -------------------------------------------------------------------------
-  timeline.to(
+  fallInTimeline.to(
     state.camera,
     {
+      fov: CAMERA.fov.fall,
       rollDeg: CAMERA.rollDegrees.max,
-      duration: beatDuration('drop'),
+      duration: fallInBeatDuration('drop'),
       ease: EASE.drop,
     },
     BEATS.drop.start
   );
-  // Title card / skip affordance fade targets: overlay-text.js owns the
-  // actual DOM tween, but per the contract director.js writes the canonical
-  // opacity value into state so any module can read a single source of truth
-  // for "is the title supposed to be visible yet."
-  timeline.to(
+  // Title card / skip affordance fade targets: overlay-text.js owns the actual DOM tween, but per
+  // the contract director.js writes the canonical opacity value into state so any module can read
+  // a single source of truth for "is the title supposed to be visible yet."
+  fallInTimeline.to(
     state.overlay,
-    { titleOpacity: 1, duration: beatDuration('drop'), ease: EASE.drop },
+    { titleOpacity: 1, duration: fallInBeatDuration('drop'), ease: EASE.drop },
     BEATS.drop.start
   );
 
   // -------------------------------------------------------------------------
-  // Beat 2 — Freefall (1 -> 4s)
-  // Sustained fall, decaying shake — roll oscillates back down toward the
-  // "min" band rather than growing further (decaying intensity, not decaying
-  // to zero, so the tumble still reads as "real" per Section 2's imperfection
-  // note). First faint bioluminescent hint appears far below: a whisper of
-  // bloom.intensity above its resting 0.3 floor.
+  // Beat 2 — Freefall (0.6 -> 2.2s)
+  // Sustained fall, decaying shake — roll oscillates back down toward the "min" band rather than
+  // growing further (decaying intensity, not decaying to zero, so the tumble still reads as "real"
+  // per Section 2's imperfection note). First faint bioluminescent hint appears far below: a
+  // whisper of bloom.intensity above its resting 0.3 floor.
   // -------------------------------------------------------------------------
-  timeline.to(
+  fallInTimeline.to(
     state.camera,
     {
       rollDeg: CAMERA.rollDegrees.min,
-      duration: beatDuration('freefall'),
-      ease: EASE.labyrinth, // sine.inOut: gentle decay of the shake, not another sharp curve
+      duration: fallInBeatDuration('freefall'),
+      ease: EASE.traverse, // sine.inOut: gentle decay of the shake, not another sharp curve
     },
     BEATS.freefall.start
   );
-  timeline.to(
+  fallInTimeline.to(
     state.bloom,
     {
       intensity: 0.45,
-      duration: beatDuration('freefall'),
+      duration: fallInBeatDuration('freefall'),
       ease: 'sine.inOut',
     },
     BEATS.freefall.start
   );
 
   // -------------------------------------------------------------------------
-  // Beat 3 — The Catch (4 -> 5.5s)
-  // FOV narrows 100 -> 60 as fall becomes walk; this recalibration is itself
-  // the "exhale" (Section 2). Roll/tilt settle fully to 0 (control returns).
-  // First proper wall-glow ignites: bloom steps up to its Act II resting
-  // level and the pulse begins at its Act II starting bpm.
+  // Beat 3 — The Catch (2.2 -> 3.2s)
+  // FOV narrows 100 -> 60 as fall becomes flight; this recalibration is itself the "exhale"
+  // (Section 2). Roll/bank settle fully to 0 (control returns as this beat ends — scroll +
+  // parallax both activate). First proper streak-field glow ignites: bloom steps up to its Act II
+  // resting level and the pulse begins at its Act II starting bpm.
   // -------------------------------------------------------------------------
-  timeline.to(
+  fallInTimeline.to(
     state.camera,
     {
       fov: CAMERA.fov.catchEnd,
       rollDeg: 0,
-      dutchTiltDeg: 0,
-      duration: beatDuration('catch'),
+      bankDeg: 0,
+      duration: fallInBeatDuration('catch'),
       ease: EASE.overflow, // power2.out: a decelerating settle, the "exhale"
     },
     BEATS.catch.start
   );
-  timeline.to(
+  fallInTimeline.to(
     state.bloom,
     {
       intensity: 0.55,
-      duration: beatDuration('catch'),
+      duration: fallInBeatDuration('catch'),
       ease: 'sine.out',
     },
     BEATS.catch.start
   );
-  timeline.set(state.pulse, { bpm: PULSE.bpmStart }, BEATS.catch.start);
+  fallInTimeline.set(state.pulse, { bpm: PULSE.bpmStart }, BEATS.catch.start);
 
-  // -------------------------------------------------------------------------
-  // Beat 4 — The Labyrinth (5.5 -> 25s)
-  // The trance, and the longest beat by design. FOV rests at CAMERA.fov.corridor
-  // for the whole act (camera.js layers walk-bob/micro-drift on top of this
-  // resting value — director.js only sets the resting target). The pulse
-  // decelerates 70bpm -> 50bpm across the *entire* act on EASE.labyrinth
-  // (long, gentle, sine.inOut) — this is the literal biofeedback illusion
-  // from Concept Section 4. Occasional Dutch-tilt beats (1-2 deg, held then
-  // corrected) are layered as a handful of short sub-tweens scattered through
-  // the act, per "texture, not a repeated gimmick." Bloom/color hold steady —
-  // no color pivot happens until "turn", per the single-hard-pivot rule.
-  // -------------------------------------------------------------------------
-  timeline.to(
-    state.camera,
-    {
-      fov: CAMERA.fov.corridor,
-      duration: beatDuration('catch') > 0 ? 0.01 : 0, // resting target is already ~reached by catch's tween; this just guarantees exact value at labyrinth start
-    },
-    BEATS.labyrinth.start
-  );
+  // Lock the resting traverse FOV in at the very end of fall-in so there's an exact, guaranteed
+  // value the instant state.beat flips to 'traverse' — camera.js layers micro-drift/bank on top of
+  // this resting target during that phase, it never needs to re-derive it itself.
+  fallInTimeline.set(state.camera, { fov: CAMERA.fov.traverse }, BEATS.catch.end);
 
-  timeline.to(
-    state.pulse,
-    {
-      bpm: PULSE.bpmEnd,
-      duration: beatDuration('labyrinth'),
-      ease: EASE.labyrinth,
-    },
-    BEATS.labyrinth.start
-  );
+  fallInTimeline.totalDuration(BEATS.catch.end); // fixed ~3.2s fall-in duration (v2.1: halved from v2's ~6.8s)
 
-  // Title card recedes shortly after the trance begins (CONCEPT.md's beat sheet only stages the
-  // title card at beat 0-1 "Trigger"/"Drop" — the Act I "loss of ground" message shouldn't
-  // linger through the surrender/trance of Act II or the wordless generosity of Act III).
-  // overlay-text.js drives the actual DOM fade on this same beat/threshold; this keeps state's
-  // canonical titleOpacity value in lockstep with it per the module's own contract.
-  timeline.to(
-    state.overlay,
-    { titleOpacity: 0, duration: beatDuration('labyrinth') * 0.06, ease: 'power1.out' },
-    BEATS.labyrinth.start + beatDuration('labyrinth') * 0.08
-  );
+  // ===========================================================================================
+  // 2. Traverse-cosmetic tweens/functions — driven by state.traverse.elapsedSeconds, NOT by any
+  // clock or by state.traverse.progress. There is no GSAP-scrubbed camera timeline for this phase
+  // (scroll.js/vortex.js own camera position directly off progress) — what's scheduled here is
+  // purely cosmetic (pulse bpm, rack-focus, turn-cue), and it's scheduled via one-shot plain GSAP
+  // tweens fired at the right elapsed-time thresholds rather than a scrubbable timeline, because
+  // elapsedSeconds only ever increases (real wall-clock time in-phase, per state.js) — nothing
+  // here needs to be scrubbed backward the way clockTime-driven timelines do.
+  // ===========================================================================================
 
-  // Scattered Dutch-tilt "held beats" through Act II — telegraphed, brief, corrected. Rather
-  // than arbitrary fixed-time fractions (which would land at moments unrelated to where the path
-  // actually turns), these are derived from corridor.js's real TURN_PLAN geometry via
-  // getTurnCurveParams(), so the tilt begins a beat *before* the camera reaches each turn and
-  // corrects just after — CONCEPT.md Section 3's "turns are telegraphed before they happen ...
-  // no motion should surprise the inner ear" requirement, applied to the one motion cue
-  // (dutch-tilt) that already existed but wasn't synced to the path. Not every turn gets a tilt
-  // (Section 2: "as texture, not a repeated gimmick") — every third turn is picked, spaced enough
-  // to read as occasional rather than constant.
-  const labSpan = beatDuration('labyrinth'); // used below for rack-focus's plain clock-fraction placement
-  const turnParams = getTurnCurveParams(); // spline-local t in [0,1] for each real turn
-  const TELEGRAPH_LEAD_SECONDS = 1.6; // tilt begins this long before the camera reaches the turn
-  const turnCueMoments = turnParams.filter((_, i) => i % 3 === 0);
-  turnCueMoments.forEach((turnT, i) => {
-    // Map the turn's spline-local position to a global clockTime using corridor.js's own
-    // labTToClockTime() — Act II is constant-pace for most of its span but bleeds velocity down
-    // near the Turn boundary (so the camera doesn't snap-decelerate at the labyrinth->turn cut),
-    // so this must match that same curve exactly rather than assuming linearity, or cues near the
-    // tail would fire out of sync with where the camera actually is.
-    const turnClockTime = labTToClockTime(turnT);
-    const tiltStart = Math.max(
-      BEATS.labyrinth.start,
-      turnClockTime - TELEGRAPH_LEAD_SECONDS
-    );
-    const tiltSign = i % 2 === 0 ? 1 : -1;
-    const tiltHoldDuration = 2.4; // "held for a few seconds" per Concept Section 2
-    const tiltAmount = tiltSign * CAMERA.dutchTiltDegrees.max;
+  // Internal "already fired" flags so each one-shot moment below triggers exactly once even
+  // though updateTraverseCosmetics runs every frame. Reset by resetTraverseCosmetics() so a fresh
+  // traverse pass (e.g. after some future replay/restart) starts clean — not required by the
+  // current single-pass piece, but cheap and keeps this module correct under skipToEnd() replay
+  // scenarios without leaking state across calls.
+  // NOTE: state.pulse.bpm is deliberately NOT driven by a GSAP tween — see updateTraverseCosmetics
+  // below, which sets it directly from a closed-form eased curve every frame. A tween target would
+  // need constant restarting as elapsed time (and therefore its computed target) changes every
+  // frame, which either thrashes easing (killing/restarting every frame) or requires the exact same
+  // "evaluate the curve at elapsed time" math a plain tween is trying to avoid — so it's simpler and
+  // equally correct to evaluate the curve directly.
+  let rackFocusMomentsFired = [];
+  let turnCueMomentsFired = [];
 
-    timeline.to(
-      state.camera,
-      { dutchTiltDeg: tiltAmount, duration: TELEGRAPH_LEAD_SECONDS, ease: EASE.labyrinth },
-      tiltStart
-    );
-    timeline.to(
-      state.camera,
-      { dutchTiltDeg: 0, duration: 1.4, ease: EASE.labyrinth },
-      tiltStart + TELEGRAPH_LEAD_SECONDS + tiltHoldDuration
-    );
+  // Rack-focus moments (Concept Section 2: "near-field streaks sharp, the deep convergence point
+  // soft, then reverse — draws the eye forward," applied to particle depth-of-field). Two moments
+  // through the trance, expressed as *fractions of SCROLL.pulseReferenceDuration* (the same
+  // elapsed-time reference the pulse curve uses) rather than fractions of total traverse duration,
+  // since traverse has no fixed total duration to take a fraction of — this is the elapsed-time
+  // re-keying ARCHITECTURE.md's director.js section calls for explicitly. A user who lingers past
+  // pulseReferenceDuration simply doesn't get additional rack-focus moments manufactured for them
+  // (two is the authored count per the beat sheet); a fast scroller who finishes before these
+  // fire just doesn't see them, same as v1's "some turns don't get a tilt" texture philosophy.
+  const RACK_FOCUS_FRACTIONS = [0.3, 0.6]; // fractions of SCROLL.pulseReferenceDuration
+  const RACK_FOCUS_NEAR = 0.9; // world-unit meters, near-field streak distance (matches postfx.js's TiltShiftEffect remap)
+  const RACK_FOCUS_FAR = 9; // world-unit meters, deep convergence point
+
+  // Turn-cue telegraph moments: a light/glyph cue a beat ahead of an upcoming vortex flow-field
+  // curve (v2's walls-less equivalent of v1's corridor-turn telegraphing). Since vortex.js's
+  // actual flow-field curve geometry isn't this module's concern (director.js authors cosmetic
+  // state values only, never reads Three.js curve objects, per the file's own contract above),
+  // these are scheduled on a repeating elapsed-time cadence rather than keyed to real turn
+  // geometry — CONCEPT.md's "occasional slow roll/bank...held briefly, then correcting" is
+  // explicitly a texture, not tied to one-true-turn positions the way v1's wall-seam corridor was.
+  const TURN_CUE_INTERVAL = 6; // seconds of elapsedSeconds between telegraphed bank/glow cues
+  const TURN_CUE_LEAD = 1.6; // seconds the cue anticipates the bank it's telegraphing
+  const TURN_CUE_HOLD = 2.4;
+  let nextTurnCueAt = TURN_CUE_INTERVAL * 0.5; // first cue arrives a bit earlier than a full interval, so it isn't a dead beat right as traverse opens
+
+  /**
+   * Resets the one-shot scheduling flags for the traverse-cosmetic tweens. Call this alongside
+   * any reset of state.traverse.elapsedSeconds (main.js's territory) if the experience is ever
+   * replayed from the top; harmless to leave unused for a single-pass piece.
+   */
+  function resetTraverseCosmetics() {
+    rackFocusMomentsFired = [];
+    turnCueMomentsFired = [];
+    nextTurnCueAt = TURN_CUE_INTERVAL * 0.5;
+  }
+
+  /**
+   * Per-frame traverse-cosmetic update. Only meaningful while state.beat === 'traverse' — main.js
+   * should call this every frame during that beat (mirroring how fallInTimeline/returnTimeline
+   * are scrubbed during their own phases). Safe to call defensively outside that beat too (it
+   * no-ops without state.traverse.elapsedSeconds advancing, since main.js only advances that
+   * field during the traverse phase per its own contract) but the primary contract is "call this
+   * while beat === 'traverse'".
+   */
+  function updateTraverseCosmetics(state) {
+    const elapsed = state.traverse.elapsedSeconds;
+
+    // NOTE: state.pulse.bpm is NOT written here. lighting.js's updateLighting() is the
+    // contractually authoritative writer of this field (ARCHITECTURE.md's lighting.js section:
+    // "drive the pulse-deceleration curve... off state.traverse.elapsedSeconds"), and main.js's
+    // fixed update order runs updateLighting() after updateTraverseCosmetics() every frame, so a
+    // second writer here would always be silently overwritten anyway — a prior version of this
+    // file wrote a competing eased curve here that was dead code for exactly that reason. See
+    // lighting.js's updateLighting() for the one real implementation of this curve.
+
+    // --- Rack-focus one-shot moments ------------------------------------------------------------
+    RACK_FOCUS_FRACTIONS.forEach((frac, i) => {
+      const fireAt = SCROLL.pulseReferenceDuration * frac;
+      if (!rackFocusMomentsFired[i] && elapsed >= fireAt) {
+        rackFocusMomentsFired[i] = true;
+        const holdEach = 1.6;
+        gsap.timeline({ defaults: { overwrite: 'auto' } })
+          .fromTo(
+            state.rackFocus,
+            { amount: 0, focusDistance: RACK_FOCUS_NEAR },
+            { amount: 1, focusDistance: RACK_FOCUS_NEAR, duration: 1.1, ease: EASE.traverse }
+          )
+          .to(state.rackFocus, { focusDistance: RACK_FOCUS_FAR, duration: 1.3, ease: EASE.traverse }, `+=${holdEach}`)
+          .to(state.rackFocus, { amount: 0, duration: 1.2, ease: EASE.traverse }, `+=${holdEach}`);
+      }
+    });
+
+    // --- Turn-cue telegraph moments (bank/glow cue a beat ahead, repeating cadence) --------------
+    if (elapsed >= nextTurnCueAt) {
+      const cueIndex = turnCueMomentsFired.length;
+      turnCueMomentsFired[cueIndex] = true;
+      // Bank direction consistently follows the vortex field's one real, constant-signed twist
+      // (VORTEX_TWIST_SIGN, derived from VORTEX.vortexTwistRate) rather than alternating
+      // arbitrarily — CONCEPT.md v2 Section 2 describes the bank as "rolling into the vortex's
+      // spiral curve," which only reads as true if the roll's direction actually corresponds to
+      // the direction the field is spiraling in, not a coin-flip alternation with no geometric
+      // referent. Magnitude still varies per-cue (CAMERA.bankDegrees.min/max) so it doesn't feel
+      // metronomic, just the sign is now anchored to something real in the scene.
+      const bankAmount = VORTEX_TWIST_SIGN * gsap.utils.random(CAMERA.bankDegrees.min, CAMERA.bankDegrees.max);
+
+      // Lead time: the brightness/density telegraph cue (state.turnCue.amount) must visibly
+      // precede the camera's actual bank motion — CONCEPT.md v2 Section 3: turn moments are
+      // "gently telegraphed a beat ahead via brightness/density cues... same function as v1's
+      // turn-telegraphing." Starting both ramps at timeline position 0 (as before) made the cue
+      // and the motion simultaneous, defeating the anticipatory function entirely. The bank tween
+      // now starts only once the cue ramp has had TURN_CUE_LEAD seconds to read on its own.
+      gsap.timeline({ defaults: { overwrite: 'auto' } })
+        .to(state.turnCue, { amount: 1, duration: TURN_CUE_LEAD * 0.7, ease: EASE.traverse }, 0)
+        .to(state.camera, { bankDeg: bankAmount, duration: TURN_CUE_LEAD * 0.6, ease: EASE.traverse }, TURN_CUE_LEAD)
+        .to(state.turnCue, { amount: 0, duration: 1.0, ease: EASE.traverse }, `+=${TURN_CUE_HOLD}`)
+        .to(state.camera, { bankDeg: 0, duration: 1.4, ease: EASE.traverse }, '<');
+
+      nextTurnCueAt = elapsed + TURN_CUE_INTERVAL;
+    }
+  }
+
+  // ===========================================================================================
+  // 3. returnTimeline — scrubbed by state.actIII.clockTime, covers turn/approach/overflow/iris.
+  // Fixed RETURN_TOTAL_DURATION (5.5s, v2.2 — halved from v2.1's 12s, see config.js) duration,
+  // same easing philosophy as v1 (EASE.overflow throughout, symmetric with fallInTimeline's
+  // ease-in per the "symmetric easing" non-negotiable). Timecodes below are relative to the
+  // return phase's own start (state.actIII.clockTime === 0), using BEATS.turn/.approach/.overflow/
+  // .iris's {duration} fields directly (accumulated), mirroring state.js's updateBeat()
+  // accumulation pattern for the same four keys. v2.2: turnStart/approachStart/overflowStart/
+  // irisStart below are computed from BEATS.*.duration, not hardcoded — so this file didn't need
+  // any offset changes when config.js's durations were halved, only this re-verification pass.
+  // ===========================================================================================
+  const returnTimeline = gsap.timeline({
+    paused: true,
+    defaults: { overwrite: 'auto' },
   });
 
-  // Turn-cue "light telegraph": a light/glyph cue a few meters ahead of a turn, per Concept
-  // Section 3's explicit mechanism ("a light cue or wall-glyph a few meters ahead"). Authored
-  // here as state.turnCue.amount (0..1) so lighting.js can brighten the nearest wall-seam accent
-  // ahead of every real turn — not just the ones that also get a dutch-tilt — giving *every*
-  // turn an anticipatory cue even though only some also get the tilt texture.
-  turnParams.forEach((turnT) => {
-    // Same shared labTToClockTime() mapping used for the dutch-tilt cues above, so every turn's
-    // light-telegraph fires in sync with the camera regardless of where it falls in Act II's
-    // constant-pace-then-decelerate curve.
-    const turnClockTime = labTToClockTime(turnT);
-    const cueStart = Math.max(BEATS.labyrinth.start, turnClockTime - TELEGRAPH_LEAD_SECONDS);
-    timeline.to(
-      state.turnCue,
-      { amount: 1, duration: TELEGRAPH_LEAD_SECONDS * 0.7, ease: EASE.labyrinth },
-      cueStart
-    );
-    timeline.to(
-      state.turnCue,
-      { amount: 0, duration: 1.0, ease: EASE.labyrinth },
-      turnClockTime
-    );
-  });
+  const turnStart = 0;
+  const approachStart = turnStart + BEATS.turn.duration;
+  const overflowStart = approachStart + BEATS.approach.duration;
+  const irisStart = overflowStart + BEATS.overflow.duration;
 
-  // Rack-focus moments (Concept Section 2: "foreground wall detail sharp, corridor-ahead soft,
-  // then reverse — draws the eye forward without forcing camera motion"). Two moments through
-  // the trance, placed away from the turn-cue/dutch-tilt beats so the eye isn't given two
-  // simultaneous cues to parse. state.rackFocus.amount drives postfx.js's DepthOfFieldEffect
-  // bokeh scale; focusDistance sweeps from a near plane (foreground sharp) to a far plane
-  // (corridor-ahead sharp) and back, so the blur itself is the thing that "reverses," not just
-  // the on/off amount. Values are WORLD UNITS (meters), matching postprocessing's
-  // DepthOfFieldEffect contract (focusDistance defaults to 3.0 world units, not a normalized
-  // 0..1 camera-space fraction) — 0.9m sits just past the corridor's near wall detail, 9m sits
-  // well down the corridor-ahead within the fog band (fogNear/fogFar = 4/40).
-  const rackFocusMoments = [0.3, 0.6]; // fractions through Act II, offset from turnCueMoments, each
-                                        // fully resolves (~6.8s) before BEATS.turn.start
-  rackFocusMoments.forEach((frac) => {
-    const startTime = BEATS.labyrinth.start + labSpan * frac;
-    const holdEach = 1.6;
-
-    timeline.fromTo(
-      state.rackFocus,
-      { amount: 0, focusDistance: 0.9 },
-      { amount: 1, focusDistance: 0.9, duration: 1.1, ease: EASE.labyrinth },
-      startTime
-    );
-    // Hold sharp-foreground/soft-corridor, then rack across to the far plane (reverse).
-    timeline.to(
-      state.rackFocus,
-      { focusDistance: 9, duration: 1.3, ease: EASE.labyrinth },
-      startTime + 1.1 + holdEach
-    );
-    timeline.to(
-      state.rackFocus,
-      { amount: 0, duration: 1.2, ease: EASE.labyrinth },
-      startTime + 1.1 + holdEach + 1.3 + holdEach
-    );
-  });
+  // Seed the return phase's own t=0 explicitly — the moment traverse completes and this timeline
+  // starts scrubbing from 0, these are the values it should already be holding (continuity with
+  // wherever fallInTimeline/traverse cosmetics left things: FOV at the traverse resting value,
+  // color still fully cool, bloom at its traverse resting level, pulse wherever it decelerated to).
+  returnTimeline.set(state.camera, { fov: CAMERA.fov.traverse }, turnStart);
+  returnTimeline.set(state.color, { mixT: 0 }, turnStart);
 
   // -------------------------------------------------------------------------
-  // Beat 5 — The Turn (25 -> 28s)
-  // A held beat: camera slows almost to stop (camera/corridor modules own the
-  // actual deceleration of motion along the spline — director.js's job here
-  // is only the color foreshadow). "Warmest color shift begins subtly" ->
-  // mixT eases from 0 toward a small non-zero value, the first hint of the
-  // single hard pivot to come. Bloom ticks up almost imperceptibly.
+  // Beat 5 — The Turn (0 -> BEATS.turn.duration = 1.2s relative, v2.2: was 0->3s in v2.1)
+  // A held beat: camera slows almost to stop (vortex.js/camera.js own the actual deceleration of
+  // motion along the travel axis — director.js's job here is only the color foreshadow).
+  // "Warmest color shift begins subtly" -> mixT eases from 0 toward a small non-zero value, the
+  // first hint of the single hard pivot to come. Bloom ticks up almost imperceptibly. Both tweens
+  // below use `duration: BEATS.turn.duration` directly, so they already fit exactly within the
+  // beat's new, shorter span with no separate offset fix needed.
   // -------------------------------------------------------------------------
-  timeline.to(
+  returnTimeline.to(
     state.color,
     {
       mixT: 0.12,
-      duration: beatDuration('turn'),
-      ease: EASE.labyrinth,
+      duration: BEATS.turn.duration,
+      ease: EASE.traverse,
     },
-    BEATS.turn.start
+    turnStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.bloom,
     {
       intensity: 0.65,
-      duration: beatDuration('turn'),
+      duration: BEATS.turn.duration,
       ease: 'sine.in',
     },
-    BEATS.turn.start
+    turnStart
   );
 
   // -------------------------------------------------------------------------
-  // Beat 6 — The Approach (28 -> 33s)
-  // Ease-out deceleration begins (EASE.overflow = power2.out) on FOV, which
-  // cheats wider (60 -> 70) so the light's growth feels accelerating even as
-  // camera movement decelerates — the "mismatch" Concept Section 3 explicitly
-  // calls out. Color finishes its pivot in full swing (mixT 0.12 -> ~0.75).
-  // Bloom/godRays grow on an *accelerating* curve (power3.in) deliberately
-  // opposed to the camera's decelerating ease — same mismatch, applied to
-  // light instead of geometry.
+  // Beat 6 — The Approach (BEATS.turn.duration -> +BEATS.approach.duration relative, i.e.
+  // 1.2 -> 3.4s, v2.2: was 3->8s in v2.1)
+  // Ease-out deceleration begins (EASE.overflow = power2.out) on FOV, which cheats wider
+  // (60 -> 70, CAMERA.fov.traverse -> CAMERA.fov.approach) so the light's growth feels
+  // accelerating even as camera movement decelerates — the "mismatch" Concept Section 3
+  // explicitly calls out. Color finishes its pivot in full swing (mixT 0.12 -> ~0.75). Bloom/
+  // godRays grow on an *accelerating* curve (power3.in) deliberately opposed to the camera's
+  // decelerating ease — same mismatch, applied to light instead of geometry. All three tweens use
+  // `duration: BEATS.approach.duration` directly, fitting exactly within the beat's new span.
+  // v2.14 FIX: FOV's ease is wrapped in zeroVelocityRamp (see that function's own comment) —
+  // color/bloom below are untouched, their own velocity discontinuities at this boundary were
+  // measured as much smaller (a max accel spike of ~0.86 for mixT vs. FOV's 13.6) and not what the
+  // "jumps at the end" feedback was describing (a felt zoom/FOV snap, not a color/bloom snap).
   // -------------------------------------------------------------------------
-  timeline.to(
+  returnTimeline.to(
     state.camera,
     {
       fov: CAMERA.fov.approach,
-      duration: beatDuration('approach'),
-      ease: EASE.overflow,
+      duration: BEATS.approach.duration,
+      ease: zeroVelocityRamp('power2.out'),
     },
-    BEATS.approach.start
+    approachStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.color,
     {
       mixT: 0.75,
-      duration: beatDuration('approach'),
+      duration: BEATS.approach.duration,
       ease: EASE.overflow,
     },
-    BEATS.approach.start
+    approachStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.bloom,
     {
       intensity: 1.1,
       godRays: 0.6,
-      duration: beatDuration('approach'),
+      duration: BEATS.approach.duration,
       ease: 'power3.in', // accelerating growth of light, opposing the camera's decelerating ease
     },
-    BEATS.approach.start
+    approachStart
   );
 
   // -------------------------------------------------------------------------
-  // Beat 7 — The Overflow (33 -> 36s)
-  // Near-stop, light fills frame, volumetric spill. Full warm whiteout,
-  // deliberate overexposure. mixT completes the pivot to 1 (labyrinthBase/
-  // Accent -> overflowEnd, the single hard color turn of the whole piece).
-  // Bloom/godRays peak past "comfortable" (bloom > 1) for the overexposed
-  // feeling Concept Section 4 explicitly wants ("too bright," walking out of
-  // a cinema into daylight). FOV settles back down slightly from its
-  // "approach" cheat as the camera comes to rest.
+  // Beat 7 — The Overflow (overflowStart -> +BEATS.overflow.duration relative, i.e. 3.4 -> 4.8s,
+  // v2.2: was 8->11s in v2.1)
+  // Near-stop, light fills frame, volumetric spill. Full warm whiteout, deliberate overexposure.
+  // mixT completes the pivot to 1 (traverseBase/Accent -> overflowEnd, the single hard color turn
+  // of the whole piece). Bloom/godRays peak past "comfortable" (bloom > 1) for the overexposed
+  // feeling Concept Section 4 explicitly wants ("too bright," walking out of a cinema into
+  // daylight). FOV settles back down slightly from its "approach" cheat as the camera comes to
+  // rest, staying just past the traverse resting FOV rather than a full reset (a near-stop, not a
+  // full reset). The color tween below uses 60% of BEATS.overflow.duration (0.84s of the 1.4s
+  // beat) so it resolves before the beat ends rather than exactly at its edge; bloom/FOV use the
+  // full `BEATS.overflow.duration` — all three fit within the beat's new, shorter span.
+  // v2.14 FIX: FOV's ease is wrapped in zeroVelocityRamp, same as the approach beat's own FOV tween
+  // above and for the same measured reason (this exact boundary showed the larger of the two
+  // spikes, -17.1deg/s instantly) — color/bloom untouched, see that fix's own comment.
   // -------------------------------------------------------------------------
-  timeline.to(
+  returnTimeline.to(
     state.color,
     {
       mixT: 1,
-      duration: beatDuration('overflow') * 0.6,
+      duration: BEATS.overflow.duration * 0.6,
       ease: 'power1.in',
     },
-    BEATS.overflow.start
+    overflowStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.bloom,
     {
       intensity: 1.6,
       godRays: 1,
-      duration: beatDuration('overflow'),
+      duration: BEATS.overflow.duration,
       ease: EASE.overflow,
     },
-    BEATS.overflow.start
+    overflowStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.camera,
     {
-      fov: CAMERA.fov.corridor + 2, // settles near-resting, not all the way back — a near-stop, not a full reset
-      duration: beatDuration('overflow'),
-      ease: EASE.overflow,
+      fov: CAMERA.fov.traverse + 2,
+      duration: BEATS.overflow.duration,
+      ease: zeroVelocityRamp('power2.out'),
     },
-    BEATS.overflow.start
+    overflowStart
   );
 
   // -------------------------------------------------------------------------
-  // Beat 8 — The Iris (36 -> 37s)
-  // Soft iris-style reveal. Cross-dissolve hold ~500ms before the radius
-  // actually starts closing, so the vestibular system gets a moment to
-  // "land" (Concept Section 3) before the iris wipes to the homepage. Return
-  // copy fades in as the iris opens onto the "world," title card recedes
-  // (overlay-text.js's own beat==='iris' branch already handles the DOM
-  // cross-fade of the title; director.js keeps the canonical opacity values
-  // in state in lockstep so both sources of truth agree).
+  // Beat 8 — The Iris (irisStart -> +BEATS.iris.duration relative, i.e. 4.8 -> 5.5s, v2.2: was
+  // 11->12s in v2.1)
+  // Soft iris-style reveal. Cross-dissolve hold before the radius actually starts closing, so the
+  // vestibular system gets a moment to "land" (Concept Section 3) before the iris wipes to the
+  // homepage. v2.2: BEATS.iris.duration is now only 0.7s (was 1s in v2.1), so the hold can no
+  // longer be a flat ~500ms constant without eating most of the beat — `Math.min(0.5, irisSpan *
+  // 0.5)` caps the hold at half the beat's own span (0.35s at the current 0.7s duration) so the
+  // subsequent radius-close tween (irisSpan - holdDuration = 0.35s) always has a real amount of
+  // time left to run, however short BEATS.iris.duration gets. Return copy fades in as the iris
+  // opens onto the "world," title card recedes (overlay-text.js's own beat==='iris' branch already
+  // handles the DOM cross-fade of the title; director.js keeps the canonical opacity values in
+  // state in lockstep so both sources of truth agree).
   // -------------------------------------------------------------------------
-  const irisSpan = beatDuration('iris');
-  const holdDuration = Math.min(0.5, irisSpan * 0.5); // ~500ms cross-dissolve hold per Concept Section 3
-  timeline.set(state.overlay, { titleOpacity: 0 }, BEATS.iris.start);
-  timeline.to(
+  const irisSpan = BEATS.iris.duration;
+  const holdDuration = Math.min(0.5, irisSpan * 0.5); // capped at half the beat's own span so the closing tween always keeps a real remainder, however short irisSpan gets (v2.2: was a safe no-op cap at the old 1s duration, now load-bearing at 0.7s)
+  returnTimeline.set(state.overlay, { titleOpacity: 0 }, irisStart);
+  returnTimeline.to(
     state.overlay,
     { returnCopyOpacity: 1, duration: irisSpan - holdDuration, ease: 'sine.out' },
-    BEATS.iris.start
+    irisStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.overlay,
     { skipOpacity: 0, duration: 0.3, ease: 'sine.out' },
-    BEATS.iris.start
+    irisStart
   );
-  timeline.to(
+  returnTimeline.to(
     state.iris,
     {
       radius: 0,
       duration: irisSpan - holdDuration,
       ease: EASE.overflow,
     },
-    BEATS.iris.start + holdDuration
+    irisStart + holdDuration
   );
 
-  // Total timeline length matches the authored 37s runtime exactly.
-  timeline.totalDuration(TOTAL_DURATION);
+  // Total timeline length matches RETURN_TOTAL_DURATION (5.5s, v2.2 — was 12s in v2.1) exactly,
+  // per config.js's authored sum of BEATS.turn/.approach/.overflow/.iris durations.
+  returnTimeline.totalDuration(RETURN_TOTAL_DURATION);
 
   // ---------------------------------------------------------------------------
-  // skipToEnd(): fast-forwards to the "iris" beat's start per the contract
-  // ("fast-forwards the GSAP timeline to the iris beat"), then lets the
-  // existing iris tweens (already scheduled above) play out normally rather
-  // than snapping straight to the fully-closed/finished frame — this
-  // preserves the ~500ms cross-dissolve hold and iris-close animation for
-  // returning/impatient visitors instead of hard-cutting them to a blank
-  // page, which would read as a bug, not a transition.
+  // skipToEnd(): v2's contract change from v1 (per ARCHITECTURE.md's director.js section) — there
+  // is no single global timeline left to seek, so this function does NOT try to seek anything to
+  // "the end." Its only job is to make sure `returnTimeline` is ready to scrub from 0 the instant
+  // main.js flips the phase over. main.js is responsible for the actual phase-transition side
+  // effects this implies: setting state.traverse.progress = 1, state.traverse.complete = true, and
+  // state.actIII.clockTime = 0, then calling returnTimeline.time(0) (or just letting the next
+  // frame's normal scrub call do it) — none of that is this function's job per the new contract.
   //
-  // The timeline stays paused/scrub-driven (main.js syncs it every frame via
-  // timeline.time(state.clockTime), matching state.clockTime — the single
-  // authoritative clock per ARCHITECTURE.md) rather than switching into
-  // autonomous GSAP playback here, so a post-skip frame tick from main.js
-  // can't fight this call by re-seeking the timeline back to the real
-  // elapsed time. Jumping state.clockTime itself is explicitly main.js's
-  // job, not this module's (director.js only owns tweened `state` values,
-  // never the clock) — so this seeks the timeline's own playhead and trusts
-  // main.js to advance state.clockTime forward from BEATS.iris.start on
-  // subsequent frames.
+  // Concretely: kill any in-flight traverse-cosmetic one-shot tweens (rack-focus/turn-cue) so they
+  // can't keep animating state.rackFocus/state.turnCue/state.camera.bankDeg into the return phase
+  // after control has already moved on, and rewind returnTimeline's own playhead to 0 defensively
+  // (idempotent — main.js's next scrub call will set it authoritatively anyway, but this guarantees
+  // calling skipToEnd() before any scrub call still leaves the timeline in a valid, seek-from-0
+  // state rather than wherever it happened to be paused from a previous partial run).
   // -------------------------------------------------------------------------
   function skipToEnd() {
-    timeline.time(BEATS.iris.start);
+    gsap.killTweensOf(state.rackFocus);
+    gsap.killTweensOf(state.turnCue);
+    gsap.killTweensOf(state.camera); // in-flight bank/turn-cue tweens only; fallInTimeline/returnTimeline still own their own scrubbed values and aren't affected by a kill of ad-hoc tweens targeting the same object
+    returnTimeline.time(0);
   }
 
   return {
-    timeline,
+    fallInTimeline,
+    returnTimeline,
     skipToEnd,
+    // Exposed alongside the two required timelines so main.js can drive the traverse phase's
+    // cosmetic tweens/functions per ARCHITECTURE.md's director.js section 2 — not part of the
+    // three-field contract literally named in the task ({ fallInTimeline, returnTimeline,
+    // skipToEnd() }), but there is no other way for main.js to invoke this phase's cosmetic
+    // scheduling without it, and the contract explicitly describes this responsibility as
+    // director.js's to own. See "Deviations" in the handoff notes.
+    updateTraverseCosmetics,
+    resetTraverseCosmetics,
   };
 }

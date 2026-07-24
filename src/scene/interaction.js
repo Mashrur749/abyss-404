@@ -1,12 +1,25 @@
-// Tracks raw human input (pointer / device-orientation) and turns it into two soft signals —
-// `state.pointer` and `state.ripple` — per CONCEPT.md Section 5 ("Resonance, not response").
+// Tracks raw human input (pointer / device-orientation / click-tap) and turns it into soft
+// signals — `state.pointer` and `state.ripple` — per CONCEPT.md Section 5 ("Resonance, not
+// response").
 //
 // This module is intentionally inert with respect to navigation: it NEVER writes state.beat,
-// never touches camera position/FOV, and never gates itself off based on the current beat —
-// it always tracks input safely, so whoever reads state.pointer/state.ripple (camera.js's
-// parallax sway, lighting.js's ripple-trail brightening, director.js's idle-mirroring pulse)
-// can decide for themselves whether/when it's visually allowed to matter (labyrinth beat only,
-// per the contract). Interaction here is a texture on a fixed path, never a fork in it.
+// never touches camera position/FOV/scroll state, and never gates itself off based on the
+// current beat — it always tracks input safely, so whoever reads state.pointer/state.ripple
+// (camera.js's parallax sway, lighting.js's ripple-trail brightening, director.js's
+// idle-mirroring pulse) can decide for themselves whether/when it's visually allowed to matter
+// (traverse beat only, per the contract). Interaction here is a texture on a fixed path, never a
+// fork in it.
+//
+// v2.2, new: a click/tap-triggered ripple BURST (`state.ripple.clickBurst`) — the explicit
+// "something to fiddle with" feedback (CONCEPT.md REVISION item 5). This is a second, independent
+// signal living alongside the pre-existing passive gaze-driven `state.ripple.strength` — the
+// two are written and decayed completely separately so neither ever clobbers the other (see
+// ARCHITECTURE.md's module-boundary bug-class warning: `state.ripple.clickBurst` is a shared
+// field other modules read from — lighting.js folds it into its own dedicated 'click-burst' boost
+// slot (kept separate from the 'ripple' slot fed by `.strength`), and vortex.js reads it directly
+// to give the streak field its actual visible burst payoff (a radius-biased brightness spike,
+// distinct in shape from the speed/living-cycle/pulse terms already driving that field) — any
+// future consumer must keep treating the two ripple fields as additive/independent, not either-or.
 
 import { RIPPLE } from '../config.js';
 
@@ -15,6 +28,16 @@ const raw = {
   x: 0, // normalized -1..1, latest known pointer/tilt position
   y: 0,
   hasMoved: false, // becomes true after the first real input event, so ripple has something to seed from
+};
+
+// Module-local click/tap-burst accumulator — deliberately separate from `raw` above so the
+// passive gaze trail and the deliberate click burst never share bookkeeping. `pending` queues a
+// freshly-fired burst for the very next updateInteraction() frame to apply at its own
+// (x, y) location; `updateInteraction` clears it once consumed.
+const clickRaw = {
+  pending: false,
+  x: 0, // normalized -1..1, screen position of the click/tap that fired the burst
+  y: 0,
 };
 
 // Threshold below which a frame's movement doesn't count as "activity" (keeps floating point
@@ -52,6 +75,29 @@ function handleTouchMove(event) {
   raw.hasMoved = true;
 }
 
+function handlePointerDownOrTap(event) {
+  // Only the primary button/first touch point counts as "the fiddle" — a stray secondary-button
+  // context-menu click, for example, shouldn't fire a burst.
+  if (typeof event.button === 'number' && event.button !== 0) return;
+
+  const w = window.innerWidth || 1;
+  const h = window.innerHeight || 1;
+  let clientX;
+  let clientY;
+  if (event.touches && event.touches.length > 0) {
+    clientX = event.touches[0].clientX;
+    clientY = event.touches[0].clientY;
+  } else {
+    clientX = event.clientX;
+    clientY = event.clientY;
+  }
+  if (typeof clientX !== 'number' || typeof clientY !== 'number') return;
+
+  clickRaw.x = clamp((clientX / w) * 2 - 1, -1, 1);
+  clickRaw.y = clamp((clientY / h) * 2 - 1, -1, 1);
+  clickRaw.pending = true;
+}
+
 function handleDeviceOrientation(event) {
   // gamma: left-right tilt in degrees, range roughly -90..90
   // beta: front-back tilt in degrees, range roughly -180..180 (we only care about a small band
@@ -74,6 +120,14 @@ export function initInteraction() {
 
   window.addEventListener('pointermove', handlePointerMove, { passive: true });
   window.addEventListener('touchmove', handleTouchMove, { passive: true });
+
+  // v2.2, new — the click/tap-triggered ripple burst ("something to fiddle with"). `pointerdown`
+  // unifies mouse click and touch tap in a single event on every modern browser/device, so one
+  // listener covers both without double-firing the way a separate `click` + `touchstart` pair
+  // could. Passive is safe here — this handler never calls preventDefault()/stopPropagation(),
+  // so it can't interfere with scroll.js's own input handling (this module never touches scroll
+  // state, per its single-responsibility contract).
+  window.addEventListener('pointerdown', handlePointerDownOrTap, { passive: true });
 
   // deviceorientation requires a permission prompt on iOS 13+; request it lazily on first
   // user gesture if the API demands it, otherwise just attach directly. Failure is silent and
@@ -107,12 +161,12 @@ export function initInteraction() {
 }
 
 /**
- * Per-frame update. Owns state.pointer (x, y, idleSeconds) and state.ripple (x, y, strength).
- * Always safe to call regardless of state.beat — this module tracks input unconditionally;
- * it is up to consumers (camera.js, lighting.js, director.js) to decide when the signal should
- * visibly matter (contract reserves visible effect to the `labyrinth` beat).
+ * Per-frame update. Owns state.pointer (x, y, idleSeconds) and state.ripple (x, y, strength,
+ * clickBurst). Always safe to call regardless of state.beat — this module tracks input
+ * unconditionally; it is up to consumers (camera.js, lighting.js, director.js) to decide when the
+ * signal should visibly matter (contract reserves visible effect to the `traverse` beat).
  *
- * Never writes state.beat, camera position, or FOV.
+ * Never writes state.beat, camera position/FOV, or scroll/traverse state.
  */
 export function updateInteraction(state, dt) {
   const pointer = state.pointer;
@@ -147,6 +201,26 @@ export function updateInteraction(state, dt) {
     const decayRate = 4 / Math.max(RIPPLE.fadeDurationSeconds, 0.001); // ~98% decayed after fadeDuration
     ripple.strength = Math.max(0, ripple.strength * Math.exp(-decayRate * dt));
     if (ripple.strength < 0.001) ripple.strength = 0;
+  }
+
+  // v2.2, new — the click/tap burst. Deliberately independent of the passive-ripple block above:
+  // its own trigger condition (a queued click/tap, not continuous movement), its own gain
+  // (RIPPLE.clickBoostGain, stronger than the passive trail so it reads as a deliberate "fiddle"),
+  // its own decay constant (RIPPLE.clickFadeDurationSeconds, longer than the passive fade), and
+  // its own screen position — never read/write `ripple.strength`/`ripple.x`/`ripple.y` here, and
+  // never let the passive-ripple block above touch `ripple.clickBurst`, so a simultaneous gaze
+  // move and a click both register fully rather than one clobbering the other.
+  if (clickRaw.pending) {
+    ripple.clickBurst = RIPPLE.clickBoostGain;
+    ripple.clickX = clickRaw.x;
+    ripple.clickY = clickRaw.y;
+    clickRaw.pending = false;
+  }
+
+  if (ripple.clickBurst > 0) {
+    const clickDecayRate = 4 / Math.max(RIPPLE.clickFadeDurationSeconds, 0.001); // ~98% decayed after clickFadeDuration
+    ripple.clickBurst = Math.max(0, ripple.clickBurst * Math.exp(-clickDecayRate * dt));
+    if (ripple.clickBurst < 0.001) ripple.clickBurst = 0;
   }
 
   lastX = raw.x;
