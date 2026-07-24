@@ -23,7 +23,7 @@
 
 import * as THREE from 'three';
 import { state, updateBeat } from './state.js';
-import { BEATS, VORTEX } from './config.js';
+import { BEATS, VORTEX, COLOR } from './config.js';
 
 import { createCamera, updateCamera } from './scene/camera.js';
 import {
@@ -34,9 +34,11 @@ import {
   getAxisPositionAtDistance,
   OVERFLOW_LIGHT_DISTANCE,
 } from './scene/vortex.js';
+
 import { initScroll, updateScroll } from './scene/scroll.js';
 import { createLighting, updateLighting } from './scene/lighting.js';
 import { createSeekingOrbs, updateSeekingOrbs } from './scene/seeking-orbs.js';
+import { createStarfield, updateStarfield } from './scene/starfield.js';
 import { createVision, updateVision } from './scene/vision.js';
 import { createGuide, updateGuide } from './scene/guide.js';
 import { initInteraction, updateInteraction } from './scene/interaction.js';
@@ -72,6 +74,12 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
 
 const scene = new THREE.Scene();
+// v2.18: the renderer previously cleared to true black (#000), which is the single most reliable
+// tell of cheap-looking dark rendering — premium dark work is essentially never pure black. This
+// is COLOR.voidBase, the near-black-but-cold value config.js has always authored for exactly this
+// purpose ("Act I: near-black, cold, never pure black") but which nothing was actually applying.
+// It also gives the additive streak field something to sit in rather than float on.
+scene.background = new THREE.Color(COLOR.voidBase);
 
 // ---------------------------------------------------------------------------
 // Module instantiation (each module's create*/init* runs exactly once)
@@ -88,6 +96,12 @@ const vortexHandle = createVortex(scene);
 
 const lightingHandle = createLighting(scene);
 const seekingOrbsHandle = createSeekingOrbs(scene, getVortexAxis);
+
+// v2.19 — the far depth layer. Takes vortex.js's raw arc-length accessor by reference (never
+// called here), the same circular-import-avoidance contract every other scenery module follows.
+// Placement is one-time and static, so this never appears in the per-frame position pipeline
+// below — only its twinkle updates each frame.
+const starfieldHandle = createStarfield(scene, getAxisPositionAtDistance);
 
 // vision.js mirrors seeking-orbs.js's exact contract: getVortexAxis is passed by reference (never
 // called here), re-invoked on demand every frame inside updateVision(), for the same
@@ -323,6 +337,7 @@ function tick(now) {
   lastRigLookAt = rig.lookAt.clone();
   updateCamera(camera, state, dt);
 
+  updateStarfield(starfieldHandle, state);
   updateVortex(vortexHandle, state, camera, dt);
   updateLighting(state, dt);
   updateSeekingOrbs(seekingOrbsHandle, state, camera, dt);

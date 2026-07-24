@@ -125,8 +125,15 @@ export function createPostFX(renderer, scene, camera) {
     mipmapBlur: true,
     intensity: 0.3,
     radius: 0.85,
-    luminanceThreshold: 0.55,
-    luminanceSmoothing: 0.2,
+    // v2.18: threshold 0.55 -> 0.3, smoothing 0.2 -> 0.4. lighting.js is effectively inert for
+    // this piece (ambient/hemi do nothing to MeshBasicMaterial or sprites; the one real light is
+    // Act III's), which makes bloom the ONLY genuine lighting lever the environment has. At 0.55
+    // — against a field deliberately dimmed in v2.17 — almost nothing ever crossed the threshold,
+    // so the abyss had no light bleed at all: the exact quality that separates premium rendering
+    // from flat-looking geometry. The generous smoothing keeps it a soft haze around the brighter
+    // threads rather than a hard on/off halo.
+    luminanceThreshold: 0.3,
+    luminanceSmoothing: 0.4,
   });
 
   const godRaysEffect = new GodRaysEffect(camera, lightSource, {
@@ -156,7 +163,7 @@ export function createPostFX(renderer, scene, camera) {
     premultiply: true,
   });
   // Fine, unobtrusive film-grain texture — present throughout, never overwhelming the frame.
-  grainEffect.blendMode.opacity.value = 0.08;
+  grainEffect.blendMode.opacity.value = 0.05; // v2.17: 0.08 -> 0.05 — finer, quieter grain (calm/premium pass)
 
   const chromaticAberrationEffect = new ChromaticAberrationEffect({
     offset: BASE_ABERRATION_OFFSET.clone(),

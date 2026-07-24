@@ -8,7 +8,13 @@
 // objects — only `state` (read/write state.dialogue.activeIndex) and the DOM
 // elements it owns (write). See ARCHITECTURE.md's contract for this file.
 //
-// v2.4 addition — SPEECH BLOBS (config.js's SPEECH_BLOB): each dialogue line's
+// v2.21 — THE SPEECH CONTAINER IS RETIRED (see config.js's DIALOGUE_VOICE). The description
+// immediately below is kept as history: it records what the `.guide-dialogue-blob` element WAS
+// from v2.4 until v2.21, and why. As of v2.21 that element is a bare layout box with no visual
+// styling of its own; the copy is lit directly instead. Do not restore any of the treatment
+// described below without reading DIALOGUE_VOICE's rationale first.
+//
+// (HISTORICAL) v2.4 addition — SPEECH BLOBS (config.js's SPEECH_BLOB): each dialogue line's
 // text is now wrapped in a purely visual `.guide-dialogue-blob` layer (a
 // soft, glowing, translucent, irregular-soft-edged shape — layered box-shadow +
 // large asymmetric border-radius, NOT a hard-edged rounded-rectangle chat
@@ -39,7 +45,8 @@ import {
   GUIDE_DIALOGUE_MIN_PAUSE_AFTER_REVEAL_SECONDS,
   VORTEX,
   SCROLL,
-  SPEECH_BLOB,
+  DIALOGUE_VOICE,
+  HOME_URL,
 } from '../config.js';
 import { state } from '../state.js';
 
@@ -62,6 +69,8 @@ let guideLine2Split = null;
 let titleRevealed = false;
 let titleReceded = false;
 let returnRevealed = false;
+let homeLinkEl = null;
+let homeLinkRevealed = false;
 let skipVisible = false;
 let skipListenerAttached = false;
 let guideLine1Revealed = false;
@@ -70,7 +79,10 @@ let guideDialogueReceded = false;
 
 // Guiding Orb dialogue copy (CONCEPT.md Section 1 / ARCHITECTURE.md's overlay-text.js
 // contract) — exact copy, do not paraphrase.
-const GUIDE_LINE_1 = "You're lost. it's a very human thing.";
+// v2.16 COPY FIX: restored to CONCEPT.md Section 1's exact authored line — the shipped copy had
+// silently dropped "That happens —" (the clause that does the actual validating) and left a
+// mid-sentence lowercase "it's" reading as a typo on screen.
+const GUIDE_LINE_1 = "You're lost. That happens — it's a very human thing.";
 const GUIDE_LINE_2 = "Follow me. I'll show you the way.";
 
 // --- v2.2: four more Guiding Orb lines, spread through the traverse -------------------------
@@ -143,6 +155,13 @@ function totalRevealSeconds(character, charCount) {
 // Line -> motion-character mapping. Indices for the traverse lines match TRAVERSE_GUIDE_LINES'
 // own order/GUIDE_DIALOGUE_AXIS_FRACTIONS; the two opening lines are named directly since they're
 // singletons, not array entries.
+// v2.22 — the two non-dialogue text elements now type too, so they need their own paces. The
+// title card is the SYSTEM's statement, not the orb's: a touch faster and more even, so it reads
+// as a machine reporting rather than a voice speaking. The return copy is the slowest thing in the
+// piece — the line everything resolves onto.
+const TITLE_CHARACTER = { charIntervalSeconds: 0.028, charFadeSeconds: 0.06, ease: 'none' };
+const RETURN_CHARACTER = { charIntervalSeconds: 0.042, charFadeSeconds: 0.1, ease: 'power1.out' };
+
 const OPENING_LINE_1_CHARACTER = MOTION_CHARACTERS.settling; // "You're lost. That happens..."
 const OPENING_LINE_2_CHARACTER = MOTION_CHARACTERS.inviting; // "Follow me. I'll show you the way."
 const TRAVERSE_LINE_CHARACTERS = [
@@ -431,10 +450,10 @@ export function initOverlayText() {
       charsClass: 'split-char',
       wordsClass: 'split-word',
     });
-    // v2.6: retuned alongside MOTION_CHARACTERS for a consistent, restrained kinetic-type register
-    // across every text element in the piece (title card, guide dialogue, return copy all share
-    // the same subtle-arrival + blur-resolve language now, not just the guide's own lines).
-    gsap.set(titleSplit.chars, { opacity: 0, yPercent: 14, rotateX: -8, filter: 'blur(6px)' });
+    // v2.22: seeded to a plain opacity:0, exactly like the dialogue. The old positional/blur seed
+    // belonged to the coalescing treatment this element used to have; a typed character does not
+    // arrive from an offset, it simply appears where it was struck.
+    gsap.set(titleSplit.chars, { opacity: 0 });
   }
 
   if (returnCopyEl) {
@@ -443,10 +462,8 @@ export function initOverlayText() {
       charsClass: 'split-char',
       wordsClass: 'split-word',
     });
-    // v2.6: yPercent brought down from 40 to stay consistent with the rest of the piece's now-
-    // subtle reveal amplitudes (blur-resolve already existed here — see the file's other reveals,
-    // now retuned to match this element's own established technique instead of the reverse).
-    gsap.set(returnSplit.chars, { opacity: 0, yPercent: 16, filter: 'blur(6px)' });
+    // v2.22: same plain opacity:0 seed as every other text element — see the title card above.
+    gsap.set(returnSplit.chars, { opacity: 0 });
   }
 
   if (skipButtonEl) {
@@ -455,6 +472,41 @@ export function initOverlayText() {
       skipButtonEl.addEventListener('click', onSkipClick);
       skipListenerAttached = true;
     }
+  }
+
+  // v2.16, NEW — the ending's way home. This is a 404 page: after the iris/whiteout climax the
+  // user was previously left stranded on a static gold frame with no link anywhere (the skip
+  // button — whose own aria-label promises "Skip to homepage" — merely fast-forwards to that
+  // same dead end, then fades itself out). A quiet anchor now assembles beneath the return copy
+  // once the iris beat settles, completing the piece's actual job: routing a lost visitor
+  // onward. Injected here (not index.html) per this module's existing self-injection precedent
+  // (#guide-dialogue), styled inline to match #return-copy's warm-ink register.
+  homeLinkEl = document.getElementById('home-link');
+  if (!homeLinkEl) {
+    const host = document.getElementById('overlay') || document.body;
+    homeLinkEl = document.createElement('a');
+    homeLinkEl.id = 'home-link';
+    homeLinkEl.href = HOME_URL;
+    homeLinkEl.textContent = 'Take me home →';
+    Object.assign(homeLinkEl.style, {
+      position: 'absolute',
+      top: '68%',
+      left: '50%',
+      transform: 'translate(-50%, -50%)',
+      fontFamily: 'var(--overlay-font-type)', // v2.22: the one shared typewriter face
+      fontSize: 'clamp(0.8rem, 1.2vw, 0.98rem)',
+      letterSpacing: '0.22em',
+      textTransform: 'uppercase',
+      textDecoration: 'none',
+      color: '#241a08',
+      borderBottom: '1px solid rgba(36, 26, 8, 0.35)',
+      paddingBottom: '0.35em',
+      opacity: '0',
+      pointerEvents: 'none',
+      userSelect: 'none',
+      zIndex: '5',
+    });
+    host.appendChild(homeLinkEl);
   }
 
   if (irisMaskEl) {
@@ -511,6 +563,15 @@ function initGuideDialogue() {
 
     guideLine1El = buildGuideDialogueLine('guide-line-1', GUIDE_LINE_1);
     guideLine2El = buildGuideDialogueLine('guide-line-2', GUIDE_LINE_2);
+
+    // v2.16 FIX: the opening lines' LINE elements must start hidden, exactly like the traverse
+    // lines below already do. Previously only their CHARS were seeded to opacity 0 — the visible
+    // speech-blob wrapper itself rendered at full opacity the moment the container faded in, so
+    // line 2's empty glowing blob sat on screen for ~2.3s before its text began typing (and the
+    // two stacked empty pills read as a login form, not a voice). Each line's element now fades
+    // in only when its own reveal actually starts — see the reveal branches in updateOverlayText.
+    gsap.set(guideLine1El, { opacity: 0 });
+    gsap.set(guideLine2El, { opacity: 0 });
 
     guideDialogueEl.appendChild(guideLine1El);
     guideDialogueEl.appendChild(guideLine2El);
@@ -570,7 +631,8 @@ function initGuideDialogue() {
 /**
  * Builds one dialogue line's DOM: a flex row (`.guide-dialogue-line`, the existing
  * opacity/position/animation target — untouched) holding a purely visual
- * `.guide-dialogue-blob` layer (v2.4, SPEECH_BLOB — the soft glowing speech-blob shape), which
+ * `.guide-dialogue-blob` layer (v2.4-v2.21 a glowing speech-blob shape; as of v2.21 a bare layout
+ * box with no visual styling — see config.js's DIALOGUE_VOICE), which
  * in turn holds a `.guide-dialogue-text` span carrying the actual copy, which is what SplitText
  * above operates on. The blob wrapper changes nothing about what SplitText targets or how
  * opacity/hold/re-arm timers are applied (still `.guide-dialogue-line`/`.guide-dialogue-text`
@@ -652,25 +714,49 @@ function applyGuideDialogueStyles(containerEl) {
     left: '50%',
     transform: 'translateX(-50%)',
     maxWidth: 'min(90vw, 40rem)',
-    padding: '0.9em 1.5rem 0.8em',
-    borderRadius: '1.1rem',
-    // Soft scrim, not a hard panel — just enough contrast lift that the text stays legible
-    // regardless of what's rendering in the 3D scene behind it, without looking like a UI chrome
-    // element sitting on top of a cinematic scene.
-    background: 'radial-gradient(ellipse at 50% 50%, rgba(5, 7, 10, 0.38) 0%, rgba(5, 7, 10, 0) 78%)',
+    // v2.21: generous padding with NO border-radius. The radius existed to shape a panel; there is
+    // no panel now. The padding's only job is to let the legibility pool below extend well past
+    // the copy on every side, so the pool's own falloff is never visible as an outline.
+    padding: '2.2em 3.5rem 2em',
+    // v2.21 — the legibility pool. A wide, soft, SHAPELESS darkening: at 150%/135% spread with the
+    // fade complete by 70%, its edge always lands outside the padded box, so there is no point at
+    // which the eye can resolve a boundary. This is the one job the retired speech container was
+    // actually needed for (keeping copy readable over a bright throat), delivered without
+    // introducing an object into a frame where nothing else has an edge.
+    // v2.22: NO BACKGROUND AT ALL. The legibility pool is gone too — even at 0.32 and shapeless it
+    // was still a darkening the eye could find, and the piece is stronger with the copy simply
+    // present in the void. Contrast now lives entirely on the glyphs (see textShadow below), which
+    // is also what lets the typewriter reveal read as words being typed into empty space rather
+    // than into a reserved area. Do not reintroduce a background here.
+    background: 'none',
     display: 'flex',
     flexDirection: 'column',
     gap: '0.6em',
-    fontFamily:
-      "'Neue Montreal', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    // v2.22: the shared typewriter face (overlay.css's --overlay-font-type). Read from the CSS
+    // custom property rather than duplicated here, so the whole piece has exactly one place the
+    // typeface is authored.
+    fontFamily: 'var(--overlay-font-type)',
     fontWeight: '400',
     fontStyle: 'normal',
-    fontSize: 'clamp(1rem, 1.7vw, 1.45rem)',
-    lineHeight: '1.55',
-    letterSpacing: '0.02em',
-    color: '#f4efe3',
+    fontSize: 'clamp(0.85rem, 1.35vw, 1.1rem)',
+    lineHeight: '1.7',
+    letterSpacing: '0.05em',
+    color: '#f7f2e6',
     textAlign: 'center', // v2.13: feedback "make the text ... centered" — was unset (left, the browser default)
-    textShadow: `0 0 20px ${hexToRgba(guideColorHex, 0.45)}, 0 0 2px rgba(0, 0, 0, 0.4)`,
+    // v2.21 — THE WORDS ARE THE LIGHT. Two halos in the Guide's own colour (a tight one that makes
+    // the glyphs themselves luminous, and a much wider faint one that reads as real falloff),
+    // plus a tight dark shadow purely for contrast against a bright throat. This is what carries
+    // "the orb is speaking" now that there's no container to carry it — and it matches how every
+    // other light in this piece is drawn: a bright core dissolving outward, never an edge.
+    textShadow: [
+      `0 0 14px ${hexToRgba(guideColorHex, DIALOGUE_VOICE.textGlowOpacity)}`,
+      `0 0 38px ${hexToRgba(guideColorHex, DIALOGUE_VOICE.textGlowWideOpacity)}`,
+      // Tight, near-opaque contact shadow. With the scrim deliberately too faint to read as a
+      // shape, THIS is what actually guarantees legibility against a bright throat — contrast
+      // carried by the glyph itself rather than by a panel behind it.
+      `0 1px 3px rgba(0, 0, 0, 0.9)`,
+      `0 0 6px rgba(0, 0, 0, 0.55)`,
+    ].join(', '),
     opacity: '0',
     pointerEvents: 'none',
     userSelect: 'none',
@@ -690,49 +776,26 @@ function applyGuideDialogueStyles(containerEl) {
     });
   });
 
-  // v2.4, NEW — SPEECH_BLOB (config.js): the soft, glowing, translucent speech-blob shape that
-  // now frames every dialogue line's text, so each line reads unambiguously as the orb
-  // SPEAKING rather than narration floating independently (CONCEPT.md v2.4 item 4). Deliberately
-  // NOT a hard-edged rounded-rectangle chat bubble:
-  //   - a single, generous, ASYMMETRIC border-radius (four different corner values, each well
-  //     past SPEECH_BLOB.cornerSoftnessPx) gives the shape an irregular, organic "soft blob"
-  //     silhouette instead of a uniform pill/rounded-rect outline;
-  //   - the fill itself is a soft radial gradient (SPEECH_BLOB.backgroundOpacity at center,
-  //     fading to fully transparent well inside the element's own edge) rather than a flat/opaque
-  //     background-color, so there's no crisp edge for the eye to read as a "panel" boundary;
-  //   - a layered box-shadow stack (several increasing blur radii at decreasing alpha, built
-  //     from SPEECH_BLOB.glowOpacity) stands in for the outer soft halo, echoing
-  //     GUIDE_LIGHT_FALLOFF's own concentric-rings-of-glow language on the orb itself, so the
-  //     blob visually rhymes with the orb's new light-based look rather than looking like a
-  //     separate UI system;
-  //   - a backdrop-filter blur (in addition to the box-shadow) is what actually keeps the whole
-  //     thing reading as "soft glowing light" rather than "rounded card with a shadow" — it
-  //     softens whatever's directly behind the text too, not just the blob's own edge.
-  // The flex wrapper that used to live directly on `.guide-dialogue-line` now lives here, since
-  // the blob is the element that actually contains and visually frames its text child (v2.13:
-  // previously "marker + text, baseline-aligned" — the marker is now removed, see
-  // buildGuideDialogueLine's own header comment for why).
-  const glowColor = hexToRgba(guideColorHex, SPEECH_BLOB.glowOpacity);
-  const glowColorSoft = hexToRgba(guideColorHex, SPEECH_BLOB.glowOpacity * 0.55);
-  const glowColorFaint = hexToRgba(guideColorHex, SPEECH_BLOB.glowOpacity * 0.22);
-  const fillColor = hexToRgba(guideColorHex, SPEECH_BLOB.backgroundOpacity);
+  // v2.21 — THE SPEECH CONTAINER IS GONE. `.guide-dialogue-blob` survives ONLY as a layout box
+  // (it is still what centres the copy and what the traverse-line positioning below targets); it
+  // has no background, no border-radius, no box-shadow and no backdrop-filter. See config.js's
+  // DIALOGUE_VOICE block for the full reasoning — in short, it was the only element in the piece
+  // with a resolvable edge, it read as a disabled search input at any real viewing size, and four
+  // prior rounds of softening it never addressed that the object itself was the problem.
+  //
+  // DO NOT reintroduce any of: background fill, borderRadius, boxShadow, backdrop-filter, or a
+  // border on this element. Each of those independently re-creates a silhouette, and a silhouette
+  // is precisely what makes it read as UI chrome in a frame where nothing else has one. If copy
+  // legibility is ever a problem, widen or deepen the container's shapeless scrim instead
+  // (DIALOGUE_VOICE.scrim*) — that solves the same problem without drawing an object.
   containerEl.querySelectorAll('.guide-dialogue-blob').forEach((blob) => {
     Object.assign(blob.style, {
-      display: 'flex',
-      justifyContent: 'center',
-      padding: '0.75em 1.3em 0.7em',
-      // Four distinct corner radii (all >= cornerSoftnessPx) instead of one uniform value —
-      // an irregular, hand-drawn-soft outline rather than a rounded-rectangle chat bubble.
-      borderRadius: `${SPEECH_BLOB.cornerSoftnessPx * 1.3}px ${SPEECH_BLOB.cornerSoftnessPx * 1.7}px ${SPEECH_BLOB.cornerSoftnessPx * 1.1}px ${SPEECH_BLOB.cornerSoftnessPx * 1.9}px`,
-      background: `radial-gradient(ellipse at 50% 45%, ${fillColor} 0%, ${hexToRgba(guideColorHex, SPEECH_BLOB.backgroundOpacity * 0.4)} 55%, rgba(0, 0, 0, 0) 88%)`,
-      boxShadow: [
-        `0 0 22px 6px ${glowColorFaint}`,
-        `0 0 46px 14px ${glowColorSoft}`,
-        `0 0 78px 22px ${glowColorFaint}`,
-        `inset 0 0 30px 4px ${glowColor}`,
-      ].join(', '),
-      backdropFilter: 'blur(14px)',
-      WebkitBackdropFilter: 'blur(14px)',
+      display: 'block',
+      background: 'none',
+      border: 'none',
+      borderRadius: '0',
+      boxShadow: 'none',
+      padding: '0',
     });
   });
 
@@ -749,18 +812,26 @@ function applyGuideDialogueStyles(containerEl) {
   containerEl.querySelectorAll('.guide-dialogue-line[id^="guide-line-traverse-"]').forEach((el) => {
     Object.assign(el.style, {
       position: 'absolute',
-      top: '0',
+      // v2.21: centred rather than pinned to `top: 0`. An absolutely-positioned child anchors to
+      // its containing block's PADDING box, and v2.21 grew that padding substantially (it's what
+      // lets the legibility pool extend past the copy). At `top: 0` the traverse lines would now
+      // sit well above the pool's own centre — lit copy drifting off its own light. Centring keeps
+      // the two aligned no matter how the padding is retuned later.
+      top: '50%',
       left: '50%',
-      transform: 'translateX(-50%)',
+      transform: 'translate(-50%, -50%)',
       width: '100%',
       textAlign: 'center', // v2.13: feedback "make the text ... centered" — matters when a line wraps to 2+ lines
     });
     const blob = el.querySelector('.guide-dialogue-blob');
     if (blob) {
+      // v2.21: `width: fit-content` is gone with the container it used to size. A full-width block
+      // simply centres its own text — and critically, a fit-content box GREW AS THE TYPEWRITER
+      // TYPED, which is a large part of what made the old element read as an input field filling
+      // up rather than a voice speaking.
       Object.assign(blob.style, {
-        justifyContent: 'center',
-        margin: '0 auto',
-        width: 'fit-content',
+        margin: '0',
+        width: '100%',
       });
     }
   });
@@ -928,14 +999,15 @@ export function updateOverlayText(state, dt) {
   if (!titleRevealed && titleSplit && state.beat === 'drop') {
     titleRevealed = true;
     gsap.to(titleCardEl, { opacity: 1, duration: 0.01 });
+    // v2.22: a real typewriter reveal, identical in kind to the orb's dialogue — one character at
+    // a time, strictly left to right, each simply appearing. Previously this was a staggered
+    // arrival (position + rotation + blur resolving over a fixed total spread); against a
+    // monospaced face that read as an effect layered on top of type rather than as typing.
     gsap.to(titleSplit.chars, {
       opacity: 1,
-      yPercent: 0,
-      rotateX: 0,
-      filter: 'blur(0px)',
-      duration: 1.0,
-      ease: 'power3.out',
-      stagger: { amount: 0.5, from: 'random' },
+      duration: TITLE_CHARACTER.charFadeSeconds,
+      ease: TITLE_CHARACTER.ease,
+      stagger: { each: TITLE_CHARACTER.charIntervalSeconds, from: 'start' },
     });
   }
 
@@ -956,6 +1028,9 @@ export function updateOverlayText(state, dt) {
   ) {
     guideLine1Revealed = true;
     gsap.to(guideDialogueEl, { opacity: 1, duration: 0.01 });
+    // v2.16: the line element (and its speech blob) becomes visible only now, as its own text
+    // starts typing — never as an empty pill waiting for copy (see the init-time seed comment).
+    gsap.to(guideLine1El, { opacity: 1, duration: 0.35, ease: 'power1.out' });
     gsap.to(guideLine1Split.chars, {
       opacity: 1,
       duration: OPENING_LINE_1_CHARACTER.charFadeSeconds,
@@ -981,6 +1056,11 @@ export function updateOverlayText(state, dt) {
     state.clockTime - BEATS.freefall.start >= GUIDE_LINE_2_DELAY_INTO_FREEFALL
   ) {
     guideLine2Revealed = true;
+    // v2.16: same deferred-blob reveal as line 1, and the already-read first line settles back
+    // to a supporting weight as the second begins speaking — the exchange reads as one voice
+    // moving on, not two captions competing at equal emphasis.
+    gsap.to(guideLine2El, { opacity: 1, duration: 0.35, ease: 'power1.out' });
+    if (guideLine1El) gsap.to(guideLine1El, { opacity: 0.55, duration: 0.8, ease: 'power1.out' });
     gsap.to(guideLine2Split.chars, {
       opacity: 1,
       duration: OPENING_LINE_2_CHARACTER.charFadeSeconds,
@@ -1204,18 +1284,38 @@ export function updateOverlayText(state, dt) {
       state.dialogue.activeIndex = -1;
     }
     gsap.to(returnCopyEl, { opacity: 1, duration: 0.01 });
+    // v2.22: typed, like everything else. Deliberately the slowest pace in the piece — this is the
+    // line the whole journey resolves onto, and it should feel set down rather than delivered.
     gsap.to(returnSplit.chars, {
       opacity: 1,
-      yPercent: 0,
-      filter: 'blur(0px)',
-      duration: 0.9,
-      ease: 'power2.out',
-      stagger: { each: 0.045, from: 'start' },
+      duration: RETURN_CHARACTER.charFadeSeconds,
+      ease: RETURN_CHARACTER.ease,
+      stagger: { each: RETURN_CHARACTER.charIntervalSeconds, from: 'start' },
     });
   }
 
+  // --- v2.16: the way home — reveals once the iris beat has settled -----------------------
+  // Gated a beat into 'iris' (rather than on its first frame) so the return copy's own reveal
+  // lands first and the link reads as the quiet final answer, not a competing headline. Once
+  // revealed it stays: this is the one overlay element that must never fade back out.
+  if (!homeLinkRevealed && homeLinkEl && state.beat === 'iris' && state.beatProgress >= 0.5) {
+    homeLinkRevealed = true;
+    homeLinkEl.style.pointerEvents = 'auto';
+    gsap.to(homeLinkEl, { opacity: 1, duration: 1.1, ease: 'power1.out' });
+  }
+
   // --- Skip affordance: fades in only after SKIP_AFFORDANCE_DELAY --------
-  if (!skipVisible && skipButtonEl && state.clockTime >= SKIP_AFFORDANCE_DELAY) {
+  // v2.16 FIX: also gated on NOT being at 'iris'/skip-requested — without that, this branch and
+  // the recede branch below toggled each other every frame once the ending began (recede sets
+  // skipVisible=false, clockTime is still past the delay, so this re-revealed it next frame),
+  // leaving the "skip" control strobing half-visible on the final frame it has no purpose on.
+  if (
+    !skipVisible &&
+    skipButtonEl &&
+    state.clockTime >= SKIP_AFFORDANCE_DELAY &&
+    state.beat !== 'iris' &&
+    !state.skipRequested
+  ) {
     skipVisible = true;
     gsap.to(skipButtonEl, { opacity: 1, duration: 0.8, ease: 'power1.out' });
   }

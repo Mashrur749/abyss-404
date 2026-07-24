@@ -66,6 +66,75 @@ export function getSharedGlowTexture() {
   return _sharedTexture;
 }
 
+let _sharedStreakTexture = null;
+
+/**
+ * v2.18, NEW — the soft ELONGATED sibling of the round glow texture above: a luminous thread
+ * with a bright centerline, soft edges across its width, and both ends tapering to nothing.
+ *
+ * Why this exists: until v2.18 the vortex field was 2400 opaque `BoxGeometry` sticks. A box has
+ * a hard silhouette, and this renderer runs `antialias: false` permanently (see main.js — canvas
+ * MSAA resurrects a documented depth-blit crash), so every one of those edges was also aliased.
+ * That is the single reason the abyss read as debris/straw rather than light, and it's why two
+ * rounds of palette and intensity tuning couldn't fix the feel: no color makes a hard-edged box
+ * look like atmosphere. An additively-blended quad carrying this texture has no silhouette at
+ * all — it dissolves into the void at its own edges, which is what "premium calm" actually
+ * requires and what the reference image's flowing field lines always were.
+ *
+ * Authored as a direct pixel loop rather than stacked canvas gradients so the across-width and
+ * along-length falloffs can be shaped independently: the width falloff is tight (a bright core
+ * that reads as a thread, not a smear), the length falloff is gentle (so a streak fades out at
+ * its tips instead of ending in two visible chopped-off caps).
+ */
+function buildStreakTexture() {
+  const width = 64;
+  const height = 256; // elongated along the geometry's own length axis (local +Y)
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(width, height);
+  const data = image.data;
+
+  for (let y = 0; y < height; y++) {
+    // 0 at the streak's midpoint, 1 at either tip.
+    const v = Math.abs((y + 0.5) / height - 0.5) * 2;
+    // Gentle taper: full strength through the middle, easing to zero at the tips.
+    const alongLength = Math.max(0, 1 - v * v);
+    const lengthFalloff = alongLength * alongLength * (3 - 2 * alongLength);
+
+    for (let x = 0; x < width; x++) {
+      // 0 at the centerline, 1 at either long edge.
+      const u = Math.abs((x + 0.5) / width - 0.5) * 2;
+      // Tight gaussian-style core so the thread keeps a luminous centerline while its edges
+      // dissolve completely — the property a BoxGeometry silhouette can never have.
+      const widthFalloff = Math.exp(-(u * u) * 5.5);
+
+      const alpha = Math.max(0, Math.min(1, widthFalloff * lengthFalloff));
+      const idx = (y * width + x) * 4;
+      data[idx] = 255;
+      data[idx + 1] = 255;
+      data[idx + 2] = 255;
+      data[idx + 3] = Math.round(alpha * 255);
+    }
+  }
+
+  ctx.putImageData(image, 0, 0);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+/** Lazily builds + caches the one shared elongated streak texture. Same one-texture-many-instances
+ * discipline as getSharedGlowTexture() above — the vortex field is a single InstancedMesh, so this
+ * texture is built once and shared by every streak in the piece. */
+export function getSharedStreakTexture() {
+  if (!_sharedStreakTexture) _sharedStreakTexture = buildStreakTexture();
+  return _sharedStreakTexture;
+}
+
 /**
  * Builds a single glow-sprite "orb": a small bright core sprite plus a larger, dimmer, additively-
  * blended halo sprite, both sharing getSharedGlowTexture(), both tinted the same `color`. Returns

@@ -42,8 +42,8 @@
 
 import * as THREE from 'three';
 import { createNoise3D } from 'simplex-noise';
-import { VORTEX, CAMERA, COLOR, BEATS, PULSE, SEEKING_ORBS, COMPANION_ORBS, AMBIENT_EVENTS, VISION_ENCOUNTER, SCROLL, PATH, STREAK_BRIGHTNESS_CEILING } from '../config.js';
-import { buildGlowOrb } from './glow-sprite.js';
+import { VORTEX, CAMERA, COLOR, BEATS, PULSE, GUIDE, SEEKING_ORBS, COMPANION_ORBS, AMBIENT_EVENTS, VISION_ENCOUNTER, SCROLL, SCROLL_FEEL, PATH, STREAK_BRIGHTNESS_CEILING } from '../config.js';
+import { buildGlowOrb, getSharedStreakTexture } from './glow-sprite.js';
 
 // ---------------------------------------------------------------------------------------------
 // v2.3 CHANGE — the travel axis is now a real THREE.CatmullRomCurve3, not a straight line.
@@ -319,10 +319,28 @@ const _fallPosStart = new THREE.Vector3();
 // out of sync again — exactly the "single source of truth" discipline ARCHITECTURE.md's "do not
 // touch" section already demands for this exact quantity (state.vortex.travelSpeed's underlying
 // arc-length derivation).
+// v2.20 — second half of the "shaky opening" fix, and a genuine fidelity bug against CONCEPT.md.
+//
+// This was `Math.pow(fallT, 2)`, whose derivative at t=0 is exactly ZERO — the camera does not
+// move at all for the first fraction of a second. Meanwhile director.js is already ramping
+// `state.camera.rollDeg` in from frame one. A stationary frame with a rotation applied to it does
+// not read as "falling"; it reads as wobbling in place, which is the other half of what was
+// reported as shakiness (the 317ms asset hitch, fixed in vision.js, was the first half).
+//
+// It also contradicted the spec this beat is built on. CONCEPT.md Section 3 is explicit: "motion
+// is continuous from t=0. The felt goal is 'immediate,' not 'eventually gets going'." A pure
+// square curve is precisely "eventually gets going."
+//
+// Now a blend: a real non-zero initial velocity (the 0.25 linear term) that still accelerates hard
+// into the fall (the 0.75 quadratic term), reaching exactly 1.0 at the end of `catch` as before.
+// The drop still "takes over" — it just no longer begins from a dead stop while the camera rolls.
+// NOTE this is the single source of truth for fall-in motion: getFallInAxialPosition AND
+// resolveTravelArcLength's fall-in branch both derive from it, so both stay consistent by
+// construction (see this file's own note on why that consolidation exists).
 function fallInEasedProgress(clockTime) {
   const fallSpan = BEATS.catch.end - BEATS.drop.start;
   const fallT = THREE.MathUtils.clamp((clockTime - BEATS.drop.start) / fallSpan, 0, 1);
-  return Math.pow(fallT, 2);
+  return 0.25 * fallT + 0.75 * fallT * fallT;
 }
 
 export function getFallInAxialPosition(clockTime, out = new THREE.Vector3()) {
@@ -891,12 +909,23 @@ const _instScale = new THREE.Vector3(1, 1, 1);
 const _instMatrix = new THREE.Matrix4();
 const _instColor = new THREE.Color();
 const _flowTangent = new THREE.Vector3();
-const _boxLocalZ = new THREE.Vector3(0, 0, 1);
+// v2.18 — scratch for the per-instance billboard basis (see updateVortex's orientation block).
+// The old `_boxLocalZ` single-axis mapping is gone with the BoxGeometry it existed for.
+const _streakNormal = new THREE.Vector3();
+const _streakRight = new THREE.Vector3();
+const _toCamera = new THREE.Vector3();
+const _streakBasis = new THREE.Matrix4();
 const _instAxisPoint = new THREE.Vector3(); // v2.3: curve sample point at each streak's wrappedDist
 const _instAxisTangent = new THREE.Vector3(); // v2.3: curve tangent at the same point
 const _streakColor = new THREE.Color(); // per-instance scratch, reused across the update loop
-const _colorBase = new THREE.Color(COLOR.traverseBase);
+// v2.16 FIX: streaks color from COLOR.streakBase (a luminous teal authored for particles), NOT
+// COLOR.traverseBase — the environment base is near-black, and using it here rendered the teal
+// majority of the field essentially invisible, leaving only the amber accent minority legible
+// (the tunnel read as brown straw instead of the reference's cyan vortex). See config.js's
+// streakBase comment for the full rationale.
+const _colorBase = new THREE.Color(COLOR.streakBase);
 const _colorAccent = new THREE.Color(COLOR.traverseAccent);
+const _colorGuide = new THREE.Color(GUIDE.color); // v2.18 — the orb's own light, cast onto nearby threads
 const _colorEnd = new THREE.Color(COLOR.overflowEnd);
 
 // Recycling wrap span (meters) along the axis, centered on wherever the camera currently is.
@@ -904,19 +933,106 @@ const _colorEnd = new THREE.Color(COLOR.overflowEnd);
 // STREAK_SPAN_Y pattern but along the travel axis (Z) instead of the fall's vertical (Y) axis.
 const STREAK_WRAP_SPAN = VORTEX.streakLength * 40;
 
+// v2.18 — atmospheric depth range (meters from camera). Threads begin dimming at
+// STREAK_FAR_FADE_START and are fully dissolved by STREAK_FAR_FADE_END, so the field recedes into
+// darkness instead of terminating at a visible population edge.
+//
+// Deliberately AUTHORED VALUES, decoupled from STREAK_WRAP_SPAN rather than derived from it. The
+// two distances answer different questions: the wrap span is how far apart streaks recycle (a
+// correctness concern — it must be large enough that recycling is never visible), while this is
+// how deep the visible world looks (a composition concern). Deriving the depth window from the
+// wrap span tied them together, so lengthening a streak would silently thin the whole field by
+// spreading the same instance count across a proportionally larger visible volume. The one
+// invariant that MUST hold: FADE_END stays comfortably inside STREAK_WRAP_SPAN / 2, so every
+// recycle happens in already-fully-invisible space (the same "be invisible at the seam"
+// guarantee the companion orbs' wrap fade has to satisfy — see WRAP_FADE_ZONE).
+const STREAK_FAR_FADE_START = 22;
+const STREAK_FAR_FADE_END = 46; // vs. STREAK_WRAP_SPAN/2 = 80m — ample margin
+
+// --- v2.20: LIGHT WAVES — "you push light into the dark" ---------------------------------------
+// Every deliberate scroll push (scroll.js's impulseCount) releases a soft band of brightness that
+// travels FORWARD down the tunnel from wherever the camera was, and dissipates. See config.js's
+// SCROLL_FEEL block for the interaction rationale.
+//
+// Why this shape: the user's input previously vanished into a velocity integrator — you could feel
+// the camera speed up, but nothing in the world acknowledged the push itself. A travelling wave
+// makes the input a visible, physical event with a direction and a lifetime: light you sent ahead
+// of you into the dark. It's also honest to the piece's own rules — it decays fully to baseline on
+// its own, never gates progress, and rides the same per-instance brightness channel (and the same
+// ceiling clamp) everything else in the streak field already uses.
+//
+// Stored as a fixed-size pool written in place: no allocation per push, and the "recycle the
+// oldest" policy means a user scrolling furiously gets a steady overlapping shimmer rather than an
+// unbounded list of live waves.
+const _lightWaves = [];
+for (let i = 0; i < SCROLL_FEEL.waveMaxActive; i++) {
+  _lightWaves.push({ originDist: 0, age: Infinity });
+}
+let _lastImpulseCount = 0;
+
+/** Spawns a wave at `originDist`, reusing whichever pool slot is furthest through its own life. */
+function spawnLightWave(originDist) {
+  let oldest = _lightWaves[0];
+  for (let i = 1; i < _lightWaves.length; i++) {
+    if (_lightWaves[i].age > oldest.age) oldest = _lightWaves[i];
+  }
+  oldest.originDist = originDist;
+  oldest.age = 0;
+}
+
+/** Total wave brightness contribution at an absolute arc-length position along the travel axis. */
+function lightWaveBoostAt(absoluteDist) {
+  let boost = 0;
+  for (let i = 0; i < _lightWaves.length; i++) {
+    const wave = _lightWaves[i];
+    if (wave.age >= SCROLL_FEEL.waveLifetimeSeconds) continue;
+    const front = wave.originDist + wave.age * SCROLL_FEEL.waveSpeed;
+    const offset = (absoluteDist - front) / SCROLL_FEEL.waveWidth;
+    const band = Math.exp(-offset * offset);
+    if (band < 0.01) continue;
+    const fade = 1 - wave.age / SCROLL_FEEL.waveLifetimeSeconds;
+    boost += SCROLL_FEEL.waveGain * band * fade * fade;
+  }
+  return boost;
+}
+
 /**
  * Builds VORTEX.streakCount instances, each anchored to a random (angle, radius, axial offset)
  * within the tunnel's spiral cross-section. Per-instance data is kept in a plain array (not
  * re-derived from the instance matrix each frame) so update can cheaply read/mutate it.
  */
 function makeStreaks() {
-  const geometry = new THREE.BoxGeometry(VORTEX.streakWidth, VORTEX.streakWidth, VORTEX.streakLength);
+  // v2.18 — THE STRUCTURAL FIX for "the environment doesn't feel premium/calming."
+  //
+  // This was a `BoxGeometry`: an opaque, hard-silhouetted stick. 2400 of them, rendered in a
+  // pipeline that can never enable canvas antialiasing (main.js documents the depth-blit crash
+  // that forbids it), is why the abyss read as floating debris/straw no matter how the palette
+  // was tuned across v2.16 and v2.17. Hard edges are not light, and no color value changes that.
+  //
+  // Now: a flat quad carrying glow-sprite.js's soft elongated streak texture, additively blended
+  // and depth-write disabled — so each streak has NO silhouette, dissolves into the void at its
+  // own edges, and accumulates with its neighbours into something that reads as luminous
+  // atmosphere rather than a crowd of objects. Deliberately still ONE InstancedMesh (a single
+  // draw call): 2400 individual THREE.Sprites would be 2400 draw calls and would tank the frame.
+  //
+  // Geometry axes matter downstream: PlaneGeometry lies in its own local XY plane, WIDTH along
+  // local +X and LENGTH along local +Y, with its normal on local +Z. updateVortex's per-instance
+  // orientation billboards local +Z toward the camera while pinning local +Y to the flow tangent
+  // — see that code for why a plane cannot reuse the old box's single setFromUnitVectors call.
+  const geometry = new THREE.PlaneGeometry(VORTEX.streakWidth, VORTEX.streakLength);
   const material = new THREE.MeshBasicMaterial({
     color: 0xffffff, // per-instance color carries the real hue via setColorAt; base stays white
+    map: getSharedStreakTexture(),
     transparent: true,
     opacity: 1,
+    depthWrite: false, // soft additive light must never occlude what's behind it via the depth
+                       // buffer — that would reintroduce a hard edge by another route
+    blending: THREE.AdditiveBlending, // light accumulates; overlapping threads read as one
+                                      // brighter volume of glow, not as stacked opaque cards
+    side: THREE.DoubleSide, // billboarding keeps quads camera-facing, but this is free insurance
+                            // against a degenerate frame flipping one edge-on
     toneMapped: false, // stay crisp/bright, not washed out by ACES tone mapping (v1 precedent)
-    fog: false, // no THREE.Fog in v2 — depth comes from density falloff toward tunnelRadiusMax
+    fog: false, // no THREE.Fog in v2 — depth is an explicit per-instance distance fade (see updateVortex)
   });
 
   const mesh = new THREE.InstancedMesh(geometry, material, VORTEX.streakCount);
@@ -937,7 +1053,7 @@ function makeStreaks() {
       radius,
       axialOffset: Math.random() * STREAK_WRAP_SPAN,
       pulsePhase: Math.random() * Math.PI * 2,
-      brightnessJitter: 0.6 + Math.random() * 0.7, // per-streak variation so the field doesn't
+      brightnessJitter: 0.75 + Math.random() * 0.5, // v2.17: tightened from 0.6+0.7 (calm pass) — per-streak variation so the field doesn't
                                                      // pulse in perfect unison (organic, not
                                                      // metronomic, same rationale as v1's lighting)
       // Seeded once (not re-rolled per frame) so a given streak consistently drops out of the
@@ -1373,6 +1489,10 @@ function updateCompanionOrbs(handle, state, camera, dt) {
   const inTraverse = state.beat === 'traverse';
   const frameDt = dt || 0.016;
   const cameraAxialDistance = resolveTravelArcLength(state);
+  // v2.20 — stillness gathering only applies during the traverse: it's the one act where the user
+  // has pace control, so it's the only act where "the user chose to rest" is a meaningful thing to
+  // answer. During the autoplay fall-in and return, no input is expected and none is rewarded.
+  const orbStillness = inTraverse ? THREE.MathUtils.clamp(state.scroll?.stillness ?? 0, 0, 1) : 0;
   const elapsed = state.traverse?.elapsedSeconds ?? 0; // real wall-clock time in-phase, NOT a
                                                           // frozen/global clock — same rule as the
                                                           // guide orb's bob and lighting.js's pulse
@@ -1467,7 +1587,25 @@ function updateCompanionOrbs(handle, state, camera, dt) {
       COMPANION_ORBS.sightingMaxDistance,
       (orb.radius - COMPANION_ORBS.minDistance) / Math.max(0.001, COMPANION_ORBS.maxDistance - COMPANION_ORBS.minDistance)
     );
-    const effectiveRadiusBase = THREE.MathUtils.lerp(orb.radius, sightingRadius, sightingPull);
+    let effectiveRadiusBase = THREE.MathUtils.lerp(orb.radius, sightingRadius, sightingPull);
+
+    // v2.20 — STILLNESS GATHERING. When the user stops scrolling, the other travellers drift a
+    // little closer rather than continuing past. Almost every scroll-driven piece punishes
+    // stopping (nothing happens, or you're simply stuck); answering it is the calmest move
+    // available here, and it's the literal content of the orb's own line: "However long this takes
+    // you, it's exactly enough." See config.js's SCROLL_FEEL block.
+    //
+    // Rides the same continuous, fully-reversible shape as sightingPull above (scroll again and
+    // they ease straight back out), so it stays resonance-not-response: it decays to baseline on
+    // its own and gates nothing.
+    const stillnessGather = orbStillness * (SCROLL_FEEL.stillnessGatherFraction ?? 0);
+    if (stillnessGather > 0) {
+      effectiveRadiusBase = THREE.MathUtils.lerp(
+        effectiveRadiusBase,
+        Math.max(COMPANION_ORBS.sightingMinDistance, effectiveRadiusBase * 0.55),
+        stillnessGather
+      );
+    }
 
     const wrappedDist =
       cameraAxialDistance +
@@ -1615,7 +1753,14 @@ function updateCompanionOrbs(handle, state, camera, dt) {
     // cluster ("make the other orbs lively as well") — additive with sightingPull rather than
     // exclusive, though in practice an orb only ever belongs to one of the two groups at once
     // (makeCompanionOrbs' disjoint index-range assignment).
-    const ambientOpacity = Math.min(1, orb.opacity * visibilityFade * (1 + sightingPull * 0.5 + orb.surroundT * 0.6));
+    // v2.20: gathered companions also brighten slightly, so resting reads as being ANSWERED
+    // rather than merely as the world going quiet.
+    const ambientOpacity = Math.min(
+      1,
+      orb.opacity *
+        visibilityFade *
+        (1 + sightingPull * 0.5 + orb.surroundT * 0.6 + orbStillness * (SCROLL_FEEL.stillnessGatherLift ?? 0))
+    );
 
     // --- Blend position/opacity/color continuously between "ambient drift" and "converged into
     // the overflow light" by `eased`, rather than switching wholesale between two code paths —
@@ -1743,7 +1888,7 @@ export function updateVortex(handle, state, camera, dt) {
   const speedT = state.beat === 'traverse'
     ? THREE.MathUtils.clamp(Math.abs(travelSpeed) / Math.max(VORTEX.travelSpan / SCROLL.minDuration, 0.001), 0, 1)
     : 0;
-  const speedBrightness = 1 + speedT * 0.4; // up to +40% brighter at max forward pace
+  const speedBrightness = 1 + speedT * 0.25; // v2.17: +40% -> +25% (calm pass) — brighter at max forward pace, without glare
   const speedStretch = 1 + speedT * 0.6; // up to +60% longer streaks at max forward pace
 
   // v2.2 click/tap ripple burst (CONCEPT.md item 5: "a click/tap-triggered particle-burst
@@ -1780,6 +1925,29 @@ export function updateVortex(handle, state, camera, dt) {
 
   _instColor.copy(_colorBase).lerp(_colorEnd, mixT); // this frame's shared teal->gold base color
 
+  // v2.18 — the Guiding Orb's cast light (see GUIDE.castRadius in config.js for the full
+  // rationale). Resolved once per frame here, consumed per-instance in the loop below. Null
+  // during any beat where the orb doesn't exist yet or has already dissolved, in which case the
+  // whole term is skipped — the field simply goes back to being lit only by itself.
+  const guidePos = state.guide?.position ?? null;
+  const guideCastRadius = GUIDE.castRadius ?? 0;
+
+  // v2.20 — advance and spawn light waves. Edge-detected off scroll.js's monotonic impulseCount so
+  // this module never has to re-derive "was that a distinct push?" from a noisy analog signal
+  // (wheel-event granularity differs wildly between trackpad, free-spinning wheel, and touch).
+  // Waves are only spawned during the traverse: it's the one act where the user has pace control,
+  // so it's the only act where a push means anything.
+  for (let i = 0; i < _lightWaves.length; i++) {
+    if (_lightWaves[i].age < SCROLL_FEEL.waveLifetimeSeconds) _lightWaves[i].age += dt;
+  }
+  const impulseCount = state.scroll?.impulseCount ?? 0;
+  if (impulseCount !== _lastImpulseCount) {
+    if (state.beat === 'traverse') spawnLightWave(axialDistanceNow);
+    _lastImpulseCount = impulseCount;
+  }
+  const intent = THREE.MathUtils.clamp(state.scroll?.intent ?? 0, 0, 1);
+  const stillness = THREE.MathUtils.clamp(state.scroll?.stillness ?? 0, 0, 1);
+
   for (let i = 0; i < streaks.length; i++) {
     const s = streaks[i];
 
@@ -1814,6 +1982,29 @@ export function updateVortex(handle, state, camera, dt) {
       .addScaledVector(_frameRight, Math.cos(effectiveAngle) * s.radius)
       .addScaledVector(_frameUp, Math.sin(effectiveAngle) * s.radius);
 
+    // v2.16 near-camera fade, SIMPLIFIED in v2.18. A streak passing within a meter or two of the
+    // camera projects as an enormous shape slicing across the frame. v2.16 had to fade it through
+    // BOTH scale and color, because with the old OPAQUE boxes a color-only fade went to black —
+    // and a black plank is still perfectly visible against a bright field. Under v2.18's ADDITIVE
+    // blending, black contributes exactly nothing to the frame, so fading the color alone makes a
+    // streak genuinely invisible. The scale channel is now free for width/length only.
+    //
+    // v2.18 also adds the matching FAR fade — the same expression with the opposite sign. This is
+    // what gives the abyss real atmospheric depth: instead of the population simply ending at its
+    // wrap boundary, distant threads dissolve gradually into the void, so the tunnel reads as
+    // receding into darkness rather than as a finite box of particles. (scene.fog can't do this
+    // job here — every material in this codebase sets `fog: false`.)
+    const camDist = _instPos.distanceTo(camera.position);
+    // v2.18: near fade extended 5m -> 9m. Soft additive quads are far more visually dominant up
+    // close than the old thin opaque boxes were (a soft thread that big becomes a bright bar
+    // sweeping the frame), and holding the foreground back is what buys the composition its
+    // negative space — the thing that actually reads as calm.
+    const nearFadeT = THREE.MathUtils.clamp((camDist - 1.2) / (9 - 1.2), 0, 1);
+    const nearFade = nearFadeT * nearFadeT * (3 - 2 * nearFadeT);
+    const farFadeT = THREE.MathUtils.clamp((STREAK_FAR_FADE_END - camDist) / (STREAK_FAR_FADE_END - STREAK_FAR_FADE_START), 0, 1);
+    const farFade = farFadeT * farFadeT * (3 - 2 * farFadeT);
+    const depthFade = nearFade * farFade;
+
     // Regional visual variety (v2.1): a gentle, position-locked density/brightness/warmth
     // profile sampled at this streak's own current axial position — NOT random per-frame noise,
     // since the same wrappedDist always maps to the same region regardless of when/how fast the
@@ -1847,8 +2038,33 @@ export function updateVortex(handle, state, camera, dt) {
       .addScaledVector(_frameRight, -Math.sin(effectiveAngle) * angularRate)
       .addScaledVector(_frameUp, Math.cos(effectiveAngle) * angularRate)
       .normalize();
-    _instQuat.setFromUnitVectors(_boxLocalZ, _flowTangent);
-    _instScale.set(1, 1, densityVisibility * speedStretch); // shrink along the streak's own long
+    // v2.18 — BILLBOARD AROUND THE FLOW AXIS. The old BoxGeometry only needed its long axis
+    // pointed along the flow (one setFromUnitVectors), because a square-section box looks the
+    // same from every angle around that axis. A flat quad does not: pointing its NORMAL along the
+    // flow would turn every streak edge-on-invisible while flying down the tunnel. So build a full
+    // basis instead — length (+Y) pinned to the flow tangent, normal (+Z) rotated about that axis
+    // to face the camera as squarely as it can. This is the standard light-streak billboard, and
+    // it's what keeps the threads readable from every camera angle on the curved path.
+    _toCamera.subVectors(camera.position, _instPos);
+    // Component of "toward camera" perpendicular to the flow direction — the only rotation freedom
+    // available once +Y is pinned.
+    _streakNormal
+      .copy(_toCamera)
+      .addScaledVector(_flowTangent, -_toCamera.dot(_flowTangent));
+    if (_streakNormal.lengthSq() < 1e-8) {
+      // Degenerate: camera sits exactly along this streak's own flow axis. Any perpendicular will
+      // do — reuse the local frame's right vector rather than leaving an unnormalizable basis.
+      _streakNormal.copy(_frameRight);
+    }
+    _streakNormal.normalize();
+    // Right-handed basis: x = y cross z.
+    _streakRight.crossVectors(_flowTangent, _streakNormal).normalize();
+    _streakBasis.makeBasis(_streakRight, _flowTangent, _streakNormal);
+    _instQuat.setFromRotationMatrix(_streakBasis);
+    // Scale now maps to the PLANE's axes: X = width, Y = length, Z unused (a plane has no depth).
+    // The near-camera fade no longer needs the scale channel at all — see the fade block above for
+    // why additive blending makes a color-only fade genuinely invisible.
+    _instScale.set(1, densityVisibility * speedStretch, 1); // shrink along the streak's own long
                                               // axis (local Z) in low-density stretches — reads as
                                               // "thinning out," not a discrete instance
                                               // disappearing — and (v2.2 item 7) stretch a little
@@ -1867,7 +2083,10 @@ export function updateVortex(handle, state, camera, dt) {
     // Streak color/brightness is the ONLY place this field's visibility comes from — no scene
     // light illuminates it (see header comment).
     s.pulsePhase += dt * pulseHz * Math.PI * 2 * (0.85 + 0.3 * (i % 3 === 0 ? 1 : 0.6));
-    const pulse = 0.55 + 0.45 * Math.sin(s.pulsePhase);
+    // v2.17 (calm pass): amplitude 0.45 -> 0.24 — a ±45% brightness swing across thousands of
+    // instances read as field-wide strobing, the opposite of the trance this act is for. The
+    // pulse survives as a visible breath, no longer a flicker.
+    const pulse = 0.72 + 0.24 * Math.sin(s.pulsePhase);
 
     // Overflow "catching the light" term (Act III only): CONCEPT.md v2 Section 4 asks for
     // streaks to visibly "catch and carry" the overflow light rather than just wash brighter in
@@ -1892,16 +2111,35 @@ export function updateVortex(handle, state, camera, dt) {
     // looking like a perfectly uniform ring snapping on all at once.
     const clickBurstBrightness = 1 + clickBurstAmount * (0.4 + axisProximity * 1.1) * s.brightnessJitter;
 
+    // v2.18 — how strongly the Guiding Orb's own light falls on THIS thread. Squared falloff so
+    // the pool has a soft, believable edge rather than a linear ramp reading as a visible disc.
+    // v2.20 — this streak's share of any travelling light wave. `wrappedDist` is camera-relative,
+    // so it's converted back to an absolute arc-length to compare against the wave's own fixed
+    // origin (the camera keeps moving after a wave is released — the wave must not move with it,
+    // or it would read as a static glow bolted to the viewer rather than light sent ahead).
+    const waveBoost = lightWaveBoostAt(cameraAxialDistance + wrappedDist);
+
+    let guideCast = 0;
+    if (guidePos && guideCastRadius > 0) {
+      const distToGuide = _instPos.distanceTo(guidePos);
+      const reach = THREE.MathUtils.clamp(1 - distToGuide / guideCastRadius, 0, 1);
+      guideCast = reach * reach;
+    }
+
     const uncappedBrightness =
       (0.35 + pulse * 0.65) *
       s.brightnessJitter *
-      (1 + turnCueAmount * 0.5) *
+      (1 + turnCueAmount * 0.35) * // v2.17: 0.5 -> 0.35 (calm pass) — the turn telegraph stays legible, less shouty
       (1 + catchLight * 1.8) *
       region.brightness * // regional variety (v2.1): gentle +0..35% near a glyph/companion-orb
                            // region, unity in the sparser stretches between — see regionalProfileAt
       livingMultiplier * // v2.2: slow, subtle real-elapsed-time breathing — see livingCycleMultiplier
       speedBrightness * // v2.2 item 7: gentle brighten with actual scroll speed during traverse
-      clickBurstBrightness; // v2.2: click/tap "fiddle" payoff — see state.ripple.clickBurst above
+      clickBurstBrightness * // v2.2: click/tap "fiddle" payoff — see state.ripple.clickBurst above
+      (1 + waveBoost) * // v2.20: light the user pushed into the dark — same ceiling-clamped product
+      (1 + guideCast * (GUIDE.castBrightnessGain ?? 0)); // v2.18: the orb's own cast light — deliberately
+                           // INSIDE the ceiling-clamped product below, so a thread the orb lights
+                           // can approach but never out-shine the orb itself
     // v2.3 FIX (light-artist review): the un-clamped product above can realistically exceed 10x
     // during ordinary interaction (fast scroll + a click near a dense/near-axis region), well past
     // the Guiding Orb's own realized brightness ceiling (GUIDE.brightnessCeiling ≈ 1.647, see
@@ -1914,7 +2152,21 @@ export function updateVortex(handle, state, camera, dt) {
     // begins dissolving the orb, so gating the clamp on mixT still under way means it never
     // suppresses the DELIBERATE "streaks catch and carry the overflow light" brightening
     // (catchLight term above) once there's no orb brightness left to protect.
-    const brightness = mixT > 0.01 ? uncappedBrightness : Math.min(STREAK_BRIGHTNESS_CEILING, uncappedBrightness);
+    // v2.20 — the ceiling now BREATHES WITH THE ORB. Without this, the light waves above would be
+    // clamped flat out of existence during the traverse (mixT is 0 for the whole act, so the
+    // clamp is always live then) and the whole "push light into the dark" mechanic would be
+    // invisible — a real trap, caught before shipping.
+    //
+    // The fix preserves the non-negotiable it exists to protect ("the orb is deliberately the
+    // brightest, warmest thing in frame") rather than weakening it: the ceiling is raised by
+    // EXACTLY the same intent-driven factor guide.js simultaneously brightens the orb by. Both
+    // rise together on a push, so their ratio — which is what "brightest in frame" actually
+    // means — is invariant. Do not raise this ceiling by any factor the orb doesn't also receive.
+    const intentCeilingScale = 1 + intent * (SCROLL_FEEL.orbResponseGlowGain ?? 0);
+    const brightness =
+      mixT > 0.01
+        ? uncappedBrightness
+        : Math.min(STREAK_BRIGHTNESS_CEILING * intentCeilingScale, uncappedBrightness);
 
     _streakColor.copy(_instColor);
     if (i % 11 === 0) {
@@ -1930,7 +2182,14 @@ export function updateVortex(handle, state, camera, dt) {
       // stretch feels a little warmer/denser," not a second hard pivot (non-negotiable #2).
       _streakColor.lerp(_colorAccent, region.warmth * (1 - mixT));
     }
-    _streakColor.multiplyScalar(brightness);
+    // v2.18: threads inside the orb's pool also take on its HUE, not just its brightness — light
+    // that doesn't change the color of what it falls on doesn't read as light. Applied after the
+    // accent/warmth tints and before the brightness multiply, so it layers over the field's own
+    // palette exactly the way a real warm source would.
+    if (guideCast > 0) {
+      _streakColor.lerp(_colorGuide, guideCast * (GUIDE.castWarmth ?? 0) * (1 - mixT));
+    }
+    _streakColor.multiplyScalar(brightness * depthFade);
 
     mesh.setColorAt(i, _streakColor);
   }

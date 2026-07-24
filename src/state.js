@@ -44,6 +44,26 @@ export const state = {
     clockTime: 0,
   },
 
+  // v2.20, NEW — owned by scroll.js, read by guide.js (the orb's response) and vortex.js (light
+  // waves + stillness gathering). This is the piece's INTERACTION signal, deliberately separate
+  // from traverse.progress (where you are) and vortex.travelSpeed (how fast the world is moving).
+  // The distinction that matters: idle-drift means the camera is always moving, so speed alone can
+  // never answer "is the user actually engaging right now?" — these fields can.
+  //   intent        0..1, how actively the user is scrolling right now (magnitude-only, so a
+  //                 backward revisit counts as fully engaged; excludes idle drift entirely)
+  //   idleSeconds   real seconds since the last genuine input
+  //   stillness     0..1, ramps in after a real pause — the piece's "it's okay to rest here"
+  //                 signal, and the one input state this experience deliberately REWARDS
+  //   impulseCount  monotonic counter, +1 per distinct deliberate push (consumers edge-detect it)
+  //   velocity      signed progress/sec, mirrored here for read-only consumers
+  scroll: {
+    intent: 0,
+    idleSeconds: 0,
+    stillness: 0,
+    impulseCount: 0,
+    velocity: 0,
+  },
+
   camera: {
     fov: CAMERA.fov.fall,
     rollDeg: 0,

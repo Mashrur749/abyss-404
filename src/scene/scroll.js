@@ -74,8 +74,56 @@ let velocity = IDLE_VELOCITY; // progress/sec, signed, clamped to [MIN_VELOCITY,
 let pendingExcitation = 0; // signed, accumulated from Observer's onChange since the last update() tick
 let observerInstance = null;
 
+// --- v2.20: the INTENT signal ------------------------------------------------------------------
+// Everything about how the piece responds to scrolling reads from here (guide.js's orb response,
+// vortex.js's light waves and stillness-gathering). This module already knew `velocity`, but
+// velocity alone can't answer the question the interaction design actually asks: *is the user
+// pushing right now, or is the piece carrying them?* Idle-drift means the camera is ALWAYS moving,
+// so "velocity > 0" is not intent. These fields separate the two.
+//
+// rawInputEnergy accumulates the magnitude of genuine input deltas and decays continuously, so it
+// reads as "how hard is the user pushing, recently" rather than "is there an event this frame"
+// (which would strobe at the mercy of wheel-event granularity, which differs wildly between a
+// trackpad, a free-spinning mouse wheel, and a touch drag).
+let rawInputEnergy = 0;
+const INPUT_ENERGY_DECAY_SECONDS = 0.4;
+// Energy level treated as "fully engaged." Deliberately low: a gentle, unhurried scroll should
+// already read as full intent — this piece must never reward scrolling HARDER.
+//
+// Sized against BOTH input devices rather than whichever one happened to be on the desk. A mouse
+// wheel delivers few, huge deltas (|deltaY| ~100-240 per click -> ~0.03-0.07 energy in one event);
+// a trackpad delivers a continuous stream of tiny ones (~1-10 -> ~0.0003-0.003 each, accumulating
+// against the decay above toward a steady state while the user keeps moving). At the first value
+// tried (0.055) a SINGLE wheel click pinned intent to 1.0 instantly, so wheel users would have got
+// a hard on/off flash while trackpad users got a smooth ramp — the same gesture reading as two
+// different interactions. This value puts one wheel click around half intent and sustained
+// trackpad scrolling in a similar band, so the orb answers the two devices comparably.
+const INPUT_ENERGY_REFERENCE = 0.12;
+
+let idleSeconds = 0;
+// Stillness ramps in only after a real pause, then over a slow window, so it reads as the piece
+// noticing you've settled rather than reacting to the gap between two wheel ticks.
+const STILLNESS_BEGIN_SECONDS = 0.7;
+const STILLNESS_FULL_SECONDS = 3.2;
+
+// Monotonic counter incremented once per distinct "push." Consumers (vortex.js's light waves) spawn
+// an event when it changes, so they never need their own edge-detection on a noisy analog signal.
+let impulseCount = 0;
+let sinceLastImpulse = Infinity;
+const MIN_IMPULSE_INTERVAL_SECONDS = 0.28; // one wave per deliberate push, not one per wheel tick
+// Must sit BELOW a single trackpad frame's worth of accumulated delta, or trackpad users would
+// essentially never release a light wave while mouse-wheel users got one per click — the same
+// cross-device inconsistency INPUT_ENERGY_REFERENCE above exists to avoid. The real spam guard is
+// MIN_IMPULSE_INTERVAL_SECONDS, not this threshold; this only rejects accidental micro-jitter.
+const IMPULSE_ENERGY_THRESHOLD = 0.004;
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function smoothstep(edge0, edge1, x) {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 /**
@@ -101,6 +149,10 @@ export function initScroll() {
       const signedDelta = self.deltaY + self.deltaX;
       if (signedDelta !== 0) {
         pendingExcitation += signedDelta * DELTA_TO_VELOCITY_GAIN;
+        // v2.20: intent is magnitude-only and direction-agnostic on purpose — scrolling BACK to
+        // revisit something is every bit as much "the user is engaged" as pushing forward, and the
+        // orb should answer it the same way.
+        rawInputEnergy += Math.abs(signedDelta) * DELTA_TO_VELOCITY_GAIN;
       }
     },
     // Prevent the Observer's default touch-scroll/gesture behavior on the canvas so touch input
@@ -128,6 +180,31 @@ export function updateScroll(state, dt) {
   // positive pendingExcitation (forward scroll) pushes toward +MAX_VELOCITY, negative
   // (backward scroll) pushes toward MIN_VELOCITY (a negative floor, itself scaled down from
   // MAX_VELOCITY by SCROLL.backwardVelocityScale so backward is real but deliberately slower).
+  // --- v2.20: resolve the intent signal BEFORE the early-returns below ------------------------
+  // Deliberately computed unconditionally, exactly like `velocity` already is (see this function's
+  // own header on why): the orb must not go momentarily unresponsive at a beat boundary, and
+  // `state.scroll` must be a valid object for every consumer from the very first frame.
+  sinceLastImpulse += dt;
+  const freshEnergy = Math.abs(pendingExcitation);
+  if (freshEnergy > 0) {
+    idleSeconds = 0;
+    if (freshEnergy >= IMPULSE_ENERGY_THRESHOLD && sinceLastImpulse >= MIN_IMPULSE_INTERVAL_SECONDS) {
+      impulseCount += 1;
+      sinceLastImpulse = 0;
+    }
+  } else {
+    idleSeconds += dt;
+  }
+
+  rawInputEnergy *= Math.exp(-dt / INPUT_ENERGY_DECAY_SECONDS);
+
+  state.scroll = state.scroll || {};
+  state.scroll.intent = clamp(rawInputEnergy / INPUT_ENERGY_REFERENCE, 0, 1);
+  state.scroll.idleSeconds = idleSeconds;
+  state.scroll.stillness = smoothstep(STILLNESS_BEGIN_SECONDS, STILLNESS_FULL_SECONDS, idleSeconds);
+  state.scroll.impulseCount = impulseCount;
+  state.scroll.velocity = velocity;
+
   if (pendingExcitation !== 0) {
     velocity = clamp(velocity + pendingExcitation, MIN_VELOCITY, MAX_VELOCITY);
     pendingExcitation = 0;

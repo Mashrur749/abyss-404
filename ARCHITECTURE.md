@@ -1,3 +1,313 @@
+# ARCHITECTURE.md v2.21 — Build Contract Addendum (The Vision Encounter Becomes One Picture)
+
+ADDENDUM on top of everything below, which otherwise stays in effect. This one **retires contract
+sections**, so read it before following any older instruction about the vision encounter's assets.
+
+## What changed
+
+1. **The two vision assets are gone, replaced by one composite render.**
+   `src/assets/couch-silhouette.jpg` and `src/assets/tv-404-screen.png` are no longer imported by
+   anything; `src/assets/vision-apparition.png` (1280x720 RGBA) is the encounter's only art. The old
+   staging was two flat photo cards 1.6m apart along the travel axis, and since the camera passes at
+   a lateral offset, parallax read them as exactly that — two pictures at different depths. The two
+   assets were also shot separately, so the figure was lit from the left and faced near-left while
+   the TV it was supposedly transfixed by sat behind and beside it. The piece's strongest image, a
+   man who cannot look away from the 404, was the one thing that staging could not show.
+2. **The entire alpha-keying pipeline is DELETED.** `loadAndKeyTexture()`, `SILHOUETTE_KEY_BAND`,
+   `silhouetteAlphaForPixel()`, `smoothstep()`, `scheduleSlice()` and `KEYING_PIXELS_PER_SLICE` are
+   all removed from `vision.js`. **This supersedes item 3 of the v2.20 addendum below and the
+   "Image loading + alpha-keying" contract further down** — there is no keying loop left to slice,
+   so the 317ms-frame-gap hazard that motivated the slicing is structurally gone, not merely
+   mitigated. `loadAlphaTexture()` (a plain `THREE.TextureLoader` decode) is the only loader.
+3. **The plane is drawn with `THREE.AdditiveBlending`.** This is what makes keying unnecessary: the
+   asset is preprocessed so its void is exactly `(0,0,0)`, and adding black is a no-op. It is also
+   the only workable choice here — measured directly on the render, the man's body and the
+   surrounding void share the same median luminance (5 vs 5), so **no luminance threshold can
+   separate subject from background on this asset**. Any future attempt to re-key it will reproduce
+   v2.8's invisible-figure bug. The asset's alpha channel carries a soft edge feather only (the
+   couch runs off the source canvas's left/bottom edges), never a subject cutout.
+4. **`config.js`: `screenWidth: 5.5` → `planeWidth: 11`**, plus `screenCenterOffset`
+   (where the TV sits inside the picture, in fractions of plane width/height) and
+   `screenWidthFraction` (the TV's share of the composite's width, which is what the glow halo is
+   now sized off). 11m is not a taste call — it is glyph-size parity with the old build, measured
+   off both files: the old "404" was 0.741m tall on screen, and the composite's "404" is
+   `0.0672 * planeWidth`.
+5. **`config.js`: `axisOffset: 3.2` → `6.5`.** At `planeWidth: 11` the plane's half-width (5.5m)
+   would otherwise extend past the travel axis and the camera would fly through the picture. 6.5m
+   keeps ~1m of clearance, preserves angular size at closest pass (11/6.5 ≈ the old 5.5/3.2), and is
+   still far inside `plateauRadius` (14m) so peak opacity is unchanged.
+6. **The CRT jitter split in two.** `screenJitterAmplitude` now moves the glow halo alone;
+   `screenJitterRotationDeg` is removed (a camera-facing sprite has no meaningful roll). The picture
+   plane gets `planeFlickerAmplitude` — a small opacity flutter — instead, because translating the
+   plane would now shake the couch and the man, which reads as a wobbling prop rather than an
+   unstable signal.
+
+## Still true
+
+`heightOffset`, the plateau/approach opacity curve, the look-ahead proximity reference point, the
+energy orbs, the companion-orb surround, the alternate-side-per-encounter convention, and the
+zero-`THREE.Light` discipline are all untouched.
+
+---
+
+# ARCHITECTURE.md v2.20 — Build Contract Addendum (Opening Fix + the SCROLL_FEEL Interaction Layer)
+
+ADDENDUM on top of v2.19's contract below (fully in effect). Read `CONCEPT.md`'s "REVISION (v2.20)"
+first.
+
+## What changed — opening
+
+1. **`vortex.js`'s `fallInEasedProgress` is no longer `t²`.** It's `0.25t + 0.75t²` — a real
+   non-zero initial velocity that still accelerates. `t²` has a derivative of exactly 0 at t=0, so
+   the camera was motionless while director.js ramped roll in, which reads as wobbling in place.
+   This is the SINGLE SOURCE OF TRUTH for fall-in motion (`getFallInAxialPosition` and
+   `resolveTravelArcLength`'s fall-in branch both derive from it) — keep it that way.
+2. **`config.js`'s `CAMERA.rollDegrees` 2-4° → 1-2.2°.**
+3. **`vision.js`'s `loadAndKeyTexture` now slices its keying loop across idle callbacks**
+   (`KEYING_PIXELS_PER_SLICE`), plus an `await img.decode()` where supported. It previously walked
+   ~1.08M pixels synchronously inside `img.onload`. Deliberately CHUNKED, not merely deferred —
+   deferring relocates a ~300ms freeze onto some other beat instead of removing it. Safe because
+   `createVision()` already renders placeholder geometry and swaps the texture in via `.then()`.
+
+## What changed — the interaction layer
+
+4. **`scroll.js` publishes `state.scroll`** — `intent` (0..1 active engagement, magnitude-only so a
+   backward revisit counts, and deliberately EXCLUDING idle drift), `stillness` (0..1, ramps in
+   after a real pause), `idleSeconds`, `impulseCount` (monotonic, +1 per deliberate push),
+   `velocity`. Resolved BEFORE the function's `state.beat !== 'traverse'` early-return, exactly as
+   `velocity` already was, so consumers never see a stale/absent object at a beat boundary.
+5. **`config.js`'s `SCROLL_FEEL`** holds every authored interaction-feel value in one place;
+   `guide.js` reads its orb-response gains from there rather than defining its own.
+6. **`guide.js`** — orb brightness/scale answer `intent`; `stillness` narrows the pulse toward its
+   own midpoint and dims slightly.
+7. **`vortex.js`** — a fixed-size light-wave pool (`_lightWaves`, `spawnLightWave`,
+   `lightWaveBoostAt`) spawned by edge-detecting `impulseCount`; companion orbs gather inward and
+   lift with `stillness`.
+
+## Do not touch / do not regress
+
+Everything in v2.19's and earlier lists still applies. Additionally:
+
+- **The brightness ceiling now scales with intent, and this is load-bearing.** During the traverse
+  `mixT` is 0, so the `STREAK_BRIGHTNESS_CEILING` clamp is always live — it would have clamped the
+  light waves flat out of existence. The ceiling is therefore raised by EXACTLY the same
+  intent-driven factor `guide.js` brightens the orb by, so both rise together and their ratio (which
+  is what "the orb is the brightest thing in frame" actually means) is invariant. **Never raise this
+  ceiling by a factor the orb does not also receive.**
+- Light waves store an ABSOLUTE arc-length origin, not a camera-relative one. The camera keeps
+  moving after a wave is released; a camera-relative wave would read as a glow bolted to the viewer
+  rather than light travelling away from you.
+- `impulseCount` is monotonic and edge-detected by consumers. Don't convert it into a boolean or
+  reset it — wheel-event granularity differs wildly across trackpad / free-spinning wheel / touch,
+  which is exactly the noise the counter exists to absorb.
+- `INPUT_ENERGY_REFERENCE` and `IMPULSE_ENERGY_THRESHOLD` in scroll.js are tuned so a mouse wheel
+  (few huge deltas) and a trackpad (many tiny ones) produce comparable intent and comparable wave
+  frequency. If either is retuned, check BOTH device profiles — the first values tried saturated
+  intent on a single wheel click while barely registering a trackpad at all.
+- Stillness responses are gated to the traverse only. The fall-in and return are autoplay; no input
+  is expected there, so none is rewarded.
+
+## Verification note for future rounds
+
+This round's browser measurements of frame timing and rendered luminance were INVALID and were
+discarded: the automated tab runs backgrounded, so Chrome throttles rAF (`document.visibilityState`
+was never `visible` — every recorded "hitch" correlated with that, not with app work), and
+`readPixels` after present returned saturated values. Additionally, **a `<script type="module">`
+injected into the page received a SEPARATE instance of `state.js`** (frozen at defaults), so
+runtime state read that way is a phantom and any writes to it never reach the running app.
+Screenshots are trustworthy; in-page numeric instrumentation via these routes is not. Prefer
+headless-Node execution of the real math (this codebase's established discipline) or verify in a
+real foreground browser.
+
+---
+
+# ARCHITECTURE.md v2.19 — Build Contract Addendum (Far Starfield Depth Layer)
+
+ADDENDUM on top of v2.18's contract below (fully in effect). Read `CONCEPT.md`'s "REVISION
+(v2.19)" first — it records why the answer to "add a lot of granular detail?" was no, and why a
+single far depth layer was the right yes.
+
+## What changed
+
+1. **NEW `src/scene/starfield.js`** — `createStarfield(scene, getAxisPositionAt)` /
+   `updateStarfield(handle, state)`. A `THREE.Points` cloud (one draw call) at 55–170m from the
+   travel axis, spanning the whole authored journey. Chosen over instanced quads specifically
+   because Points are camera-facing by construction — no per-frame billboard matrix work for 650
+   elements; the per-frame cost is a color-attribute write for the twinkle and nothing else.
+2. **`config.js` gains `STARFIELD`** — count/radius/size/opacity/twinkle/palette. Colors are drawn
+   from the piece's existing families (a cold blue-white majority, a champagne minority), not a
+   new third family.
+3. **`main.js`** wires it: `getAxisPositionAtDistance` passed BY REFERENCE (never called there),
+   same circular-import-avoidance contract as seeking-orbs/vision/guide. `updateStarfield` runs
+   just before `updateVortex`.
+
+## Structural properties that are load-bearing — do not regress
+
+- **Static placement, never recycled.** Positions are computed once and never change. Distant
+  stars that recycle stop reading as distant, AND not recycling means there is no wrap seam — the
+  bug class that produced two separate real defects in the companion orbs (v2.9's full-opacity
+  200–290m teleports). If anyone ever adds motion here, it needs the wrap-fade guarantee.
+- **`renderOrder = -1`** so the layer draws behind the streak field.
+- **Fades by `(1 - mixT)`** so it dissolves into the Act III overflow rather than persisting as
+  cool specks over the warm climax — the single-hard-color-pivot non-negotiable.
+- **Twinkle is driven off `state.traverse.elapsedSeconds` during the traverse**, not
+  `state.clockTime` (frozen for the whole traverse — the codebase's standing trap, see vision.js's
+  screen-jitter comment).
+- **It must stay subordinate.** This layer's entire job is to make the dark feel inhabited. The
+  first live pass was authored far too dense/large/bright and read as a swarm of blobs; the shipped
+  values are the retune. Acceptance test if touched: **individual particles must not be pickable.**
+
+---
+
+# ARCHITECTURE.md v2.18 — Build Contract Addendum (Streak-Field Renderer Swap + Real Cast Light)
+
+ADDENDUM on top of v2.17's contract below, which stays in effect EXCEPT for the one entry
+explicitly superseded at the end of this section. Read `CONCEPT.md`'s "REVISION (v2.18)" first —
+it records why this was a renderer problem and not a choreography problem.
+
+## What changed
+
+1. **NEW `glow-sprite.js` export: `getSharedStreakTexture()`** — the elongated sibling of
+   `getSharedGlowTexture()`. Bright centerline, tight gaussian falloff across its width, gentle
+   taper at both ends. Built by direct pixel loop (not stacked canvas gradients) so the width and
+   length falloffs are independently shapeable. One texture, shared by the whole field.
+2. **`vortex.js` `makeStreaks()`: `BoxGeometry` → `PlaneGeometry(streakWidth, streakLength)`**,
+   material gains `map: getSharedStreakTexture()`, `blending: THREE.AdditiveBlending`,
+   `depthWrite: false`, `side: THREE.DoubleSide`. **Still exactly one `InstancedMesh`** — do not
+   refactor this into per-streak `THREE.Sprite`s (that would be 900 draw calls; `buildGlowOrb` is
+   the wrong primitive here for that reason).
+3. **`vortex.js` per-instance orientation is now a full billboard basis, not a single
+   `setFromUnitVectors`.** A square-section box is symmetric about its long axis so one axis
+   mapping sufficed; a flat quad is not. Local **+Y** (the plane's length) pins to the flow
+   tangent, local **+Z** (its normal) rotates about that axis toward the camera, local +X = Y×Z.
+   Degenerate case (camera exactly on the streak's flow axis) falls back to `_frameRight`. If this
+   is ever touched: mapping the plane's NORMAL to the flow tangent — the old box behaviour — turns
+   every streak edge-on-invisible down the tunnel.
+4. **`_instScale` semantics changed with the geometry**: X = width, Y = length, Z unused. It was
+   previously X/Y = thickness, Z = length.
+5. **`vortex.js` gains `STREAK_FAR_FADE_START`/`STREAK_FAR_FADE_END` (22m / 46m)** — atmospheric
+   depth. Deliberately AUTHORED, not derived from `STREAK_WRAP_SPAN`: the wrap span is a
+   correctness distance (recycling must be invisible), the fade is a composition distance (how
+   deep the world looks). Deriving one from the other made changing `streakLength` silently thin
+   the whole field. Invariant to preserve: **FADE_END must stay comfortably inside
+   `STREAK_WRAP_SPAN / 2`** (currently 46 vs 90) so recycling always happens in invisible space.
+6. **Near fade extended to 9m**; soft additive quads dominate the frame far more at close range
+   than thin opaque boxes did.
+7. **`config.js`**: `VORTEX.streakCount` 2400→900, `streakLength` 3→4.5, `streakWidth` 0.03→0.18
+   (the visible core is only the middle ~40% of the quad under the texture's falloff, so quad
+   width is no longer the same thing as visible thickness); `COLOR.streakBase` re-saturated to
+   0x3d92a6 (additive + bloom pull perceived hue toward white, the opposite of the opaque-box
+   regime v2.17 desaturated for); `VISION_ENCOUNTER.axisOffset` 1.4→3.2.
+8. **`config.js` `GUIDE` gains `castRadius`/`castBrightnessGain`/`castWarmth`, consumed by
+   `vortex.js`** — the orb's light falls on nearby threads (brightness AND hue; light that doesn't
+   change the color of what it falls on doesn't read as light). The brightness term is folded
+   INSIDE the `STREAK_BRIGHTNESS_CEILING`-clamped product on purpose, so a lit thread can approach
+   but never out-shine the orb. The hue term is scaled by `(1 - mixT)` so it yields to the Act III
+   pivot rather than fighting it.
+9. **`main.js`: `scene.background = COLOR.voidBase`** (was clearing to true black).
+10. **`postfx.js`**: bloom `luminanceThreshold` 0.55→0.3, `luminanceSmoothing` 0.2→0.4. Bloom is
+    the only real lighting lever this piece has — `lighting.js`'s ambient/hemi do nothing to unlit
+    materials and sprites.
+
+## SUPERSEDES a v2.16 entry
+
+v2.16's contract says *"The near-camera fade must act through BOTH scale and color."* **That is
+now wrong and is retired.** Its rationale was that a color-only fade goes to black, and a black
+plank is visible against a bright field — true for OPAQUE boxes. Under additive blending, black
+contributes exactly nothing, so the color channel alone fades a streak to genuine invisibility.
+The near/far fades are now color-only and the scale channel carries width/length exclusively.
+
+## Do not touch / do not regress
+
+Everything else in v2.17's and v2.16's lists still applies. Additionally:
+- The field must stay ONE `InstancedMesh` (item 2).
+- The billboard basis must keep +Y on the flow tangent (item 3).
+- FADE_END stays well inside `STREAK_WRAP_SPAN / 2` (item 5).
+- The orb's cast-light brightness stays inside the ceiling clamp (item 8) — the orb being the
+  brightest, warmest thing in frame is a load-bearing non-negotiable.
+- Additive fields blow out by SUMMING, which no per-instance clamp can prevent. If `streakCount`
+  is raised again, re-check for near-axis white-out (sample center-frame pixels for clipping, the
+  way this round did) rather than trusting the per-streak ceiling.
+
+---
+
+# ARCHITECTURE.md v2.17 — Build Contract Addendum (Calm/Premium Design-Language Pass)
+
+This is an ADDENDUM on top of v2.16's contract below (still fully in effect). Read `CONCEPT.md`'s
+"REVISION (v2.17)" section first. All changes are intensity/palette/pacing values — no structural
+or machinery changes.
+
+## What changed
+
+1. **`config.js`**: `SCROLL.idleDriftDuration` 26 -> 18 ("the scroll feels too long" — do NOT
+   lower `minDuration` below 10 without re-running the v2.9 dialogue-budget arithmetic);
+   `COLOR.streakBase` 0x2f9fae -> 0x4f939e; `COLOR.traverseAccent` 0xffb347 -> 0xe9bc82;
+   `VISION_ENCOUNTER.screenGlowColor` 0xff9a4d -> 0xe0a266; `VORTEX.streakWidth` 0.04 -> 0.03;
+   `SPEECH_BLOB.backgroundOpacity` 0.16 -> 0.1, `.glowOpacity` 0.35 -> 0.22.
+2. **`vortex.js`**: pulse `0.55 + 0.45*sin` -> `0.72 + 0.24*sin`; `brightnessJitter` range
+   0.6-1.3 -> 0.75-1.25; `speedBrightness` +40% -> +25%; turn-cue boost 0.5 -> 0.35.
+3. **`postfx.js`**: grain blend opacity 0.08 -> 0.05.
+4. **`overlay-text.js`**: dialogue container scrim 0.38 -> 0.26 alpha; font-size/tracking/leading
+   retuned (clamp(0.95rem,1.5vw,1.25rem) / 0.045em / 1.65).
+5. **`overlay.css`**: `#iris-mask` gradient softened (#fff4d6/#f6e2ad -> #f8eccf/#efdcae).
+
+## Do not touch / do not regress
+
+Everything in v2.16's list below still applies. Additionally:
+- The warm palette is ONE champagne family anchored on `GUIDE.color` (0xffd9a0) — any future warm
+  element should be picked from inside the GUIDE.color -> traverseAccent -> screenGlowColor band,
+  never a fresh saturated orange.
+- Streak pulse amplitude and jitter ranges were reduced specifically for calm — if the field ever
+  reads "dead," add variety through motion/density, not by re-widening brightness oscillation.
+
+---
+
+# ARCHITECTURE.md v2.16 — Build Contract Addendum (Live Creative-Director Pass)
+
+This is an ADDENDUM on top of v2.15's contract below (still fully in effect). Every change was
+found by walking the LIVE build end-to-end in a real browser and re-verified live after fixing.
+Read `CONCEPT.md`'s "REVISION (v2.16)" section first.
+
+## What changed
+
+1. **`config.js`'s `COLOR` gains `streakBase` (0x2f9fae)** and `vortex.js`'s `_colorBase` now
+   reads it instead of `COLOR.traverseBase` — the environment base is near-black and rendered the
+   teal streak majority invisible (only amber accents registered; the tunnel read brown).
+2. **`vortex.js` per-streak near-camera fade**: `nearFade` (smoothstep of camera distance over
+   1.2–5m) computed right after `_instPos`, applied to BOTH `_instScale` (x/y and long-axis) and
+   the final color multiply. Instanced `MeshBasicMaterial` has no per-instance opacity — color
+   alone fades to *black*, which reads as a dark plank against a bright field, so the scale
+   channel is load-bearing here; do not remove either half.
+3. **`config.js`'s `VISION_ENCOUNTER`**: `screenGlowPeakOpacity` 0.5 -> 0.28; NEW
+   `screenGlowScale` (1.35) replaces the hardcoded 2.2 halo multiplier duplicated at both
+   `vision.js` call sites (construction + texture-resolve), which both now read the config value.
+4. **`overlay-text.js`**: (a) `GUIDE_LINE_1` restored to CONCEPT.md's authored copy; (b)
+   `guideLine1El`/`guideLine2El` seeded to `opacity: 0` at build (matching the traverse lines) and
+   faded in only when their own reveal starts — the blob wrapper was previously visible as an
+   empty pill before its text typed; (c) line 1 settles to 0.55 opacity when line 2 starts; (d)
+   the blob's `inset` box-shadow ring and `backdrop-filter` are REMOVED (both traced the
+   border-radius as a crisp pill/input-field outline — do not reintroduce either without checking
+   the blob still reads as soft light against a bright streak field); (e) title-card reveal
+   stagger `from: 'random'` -> `'start'`; (f) NEW `#home-link` anchor (self-injected, `HOME_URL`
+   from config.js) revealed at `iris` beatProgress >= 0.5 with pointer-events enabled only on
+   reveal; (g) the skip-affordance reveal branch is now gated on `state.beat !== 'iris' &&
+   !state.skipRequested` — it used to re-reveal every frame after the iris recede branch hid it
+   (a per-frame toggle that left the control strobing on the final frame).
+5. **`overlay.css`**: `#title-card` top 42% -> 30% (clear of the orb's on-screen band).
+6. **`config.js` gains `HOME_URL`** — the ending CTA's destination. The piece previously had no
+   navigation anywhere; a 404 page must route the visitor onward.
+
+## Do not touch / do not regress
+
+Everything in v2.15's list below still applies. Additionally:
+- `COLOR.streakBase` is the streak field's color; `COLOR.traverseBase` is the environment base.
+  Reverting streaks to `traverseBase` re-hides the entire teal field.
+- The near-camera fade must act through BOTH scale and color (see item 2's rationale).
+- The ending must always offer a way home once the iris settles — `#home-link` is the one overlay
+  element that never fades back out.
+
+---
+
 # ARCHITECTURE.md v2.15 — Build Contract Addendum (TV Screen Asset Swap, Glow-Halo Fix, Size)
 
 This is an ADDENDUM on top of v2.14's contract below (still fully in effect). Applied via direct

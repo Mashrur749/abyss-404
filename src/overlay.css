@@ -12,12 +12,20 @@
   --overlay-ink: #f4efe3;
   --overlay-ink-dim: rgba(244, 239, 227, 0.72);
   --overlay-void: #0a0a14;
-  --overlay-font-display:
-    'Cormorant Garamond', 'Times New Sonoma', Georgia, 'Iowan Old Style',
-    'Palatino Linotype', serif;
-  --overlay-font-control:
-    'Neue Montreal', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
-    sans-serif;
+  /* v2.22 — ONE TYPEWRITER FACE FOR THE WHOLE PIECE.
+     Previously three unrelated voices: a display serif for the title, a humanist sans for the
+     dialogue, and the same sans for controls. Every text element now shares one monospaced
+     typewriter face, which is what makes the typewriter REVEAL (see overlay-text.js — now applied
+     to every element, not just the orb's dialogue) read as one consistent act of typing rather
+     than as an effect applied to one element.
+     Courier leads deliberately: it is the actual typewriter face and is present on every platform.
+     No webfont is loaded anywhere in this project, so the stack must be system-resolvable. */
+  --overlay-font-type:
+    'Courier New', 'Nimbus Mono PS', 'Cutive Mono', ui-monospace, 'SF Mono',
+    Menlo, Consolas, monospace;
+  /* Kept as aliases so any older rule referencing them still resolves to the one face. */
+  --overlay-font-display: var(--overlay-font-type);
+  --overlay-font-control: var(--overlay-font-type);
 }
 
 * {
@@ -80,20 +88,32 @@ body {
    -------------------------------------------------------------------------- */
 #title-card {
   position: absolute;
-  top: 42%;
+  /* v2.16: raised from 42% — at 42% the copy sat directly across the Guiding Orb's on-screen
+     band (the orb rides just above frame-center under the chase-cam), so the title rendered
+     on top of the orb's glow for its whole lifetime. 30% clears that band. */
+  top: 30%;
   left: 50%;
   transform: translate(-50%, -50%);
   max-width: min(90vw, 42rem);
   padding: 0 1.5rem;
-  font-family: var(--overlay-font-display);
+  font-family: var(--overlay-font-type);
   font-weight: 400;
-  font-style: italic;
-  font-size: clamp(1.35rem, 2.6vw, 2.35rem);
-  line-height: 1.5;
-  letter-spacing: 0.09em;
+  /* v2.22: italic dropped — a typewriter has no italic, and the slant fought the mono rhythm.
+     Size stepped down because a monospaced face sets much wider at the same point size. */
+  font-style: normal;
+  font-size: clamp(1.05rem, 1.9vw, 1.6rem);
+  line-height: 1.6;
+  letter-spacing: 0.06em;
   color: var(--overlay-ink);
   opacity: 0;
-  text-shadow: 0 0 28px rgba(255, 179, 71, 0.18), 0 0 2px rgba(0, 0, 0, 0.4);
+  /* v2.22: with the dialogue scrim removed piece-wide, every text element now carries its own
+     contrast. Warm inner glow (it is lit by the same light as everything else) plus a tight dark
+     contact shadow so it stays readable over a bright throat. */
+  text-shadow:
+    0 0 16px rgba(255, 217, 160, 0.4),
+    0 0 40px rgba(255, 217, 160, 0.2),
+    0 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 6px rgba(0, 0, 0, 0.55);
 }
 
 #title-card .split-char,
@@ -113,15 +133,18 @@ body {
   transform: translate(-50%, -50%);
   max-width: min(90vw, 36rem);
   padding: 0 1.5rem;
-  font-family: var(--overlay-font-display);
+  font-family: var(--overlay-font-type);
   font-weight: 400;
   font-style: normal;
-  font-size: clamp(1.1rem, 2.1vw, 1.75rem);
-  line-height: 1.6;
-  letter-spacing: 0.14em;
+  /* v2.22: stepped down for the wider monospaced face, tracking eased for the same reason. */
+  font-size: clamp(0.95rem, 1.6vw, 1.3rem);
+  line-height: 1.7;
+  letter-spacing: 0.1em;
   color: #241a08;
   opacity: 0;
-  text-shadow: 0 0 20px rgba(255, 244, 214, 0.5);
+  /* Dark ink on the warm whiteout — a light halo would be invisible here, so this one keeps a
+     soft light bloom for warmth plus a faint dark spread for edge definition. */
+  text-shadow: 0 0 20px rgba(255, 244, 214, 0.6), 0 1px 2px rgba(36, 26, 8, 0.18);
 }
 
 #return-copy .split-char,
@@ -189,11 +212,14 @@ body {
      (state.iris.radius: 1 -> 0), so the color revealed LAST is whatever sits at this
      gradient's outer edge. Keeping the outer stop warm (not a dark void) ensures the
      close-transition ends on warm overexposure rather than reverting to darkness. */
+  /* v2.17 (calm/premium pass): softened a step down from the previous #fff4d6/#f6e2ad — the
+     full-brightness gold flooded the eye after 20-30s of near-dark adaptation. Still warm
+     overexposure, no longer glare. */
   background: radial-gradient(
     circle at 50% 50%,
-    #fff4d6 0%,
-    #f6e2ad 55%,
-    #fff4d6 100%
+    #f8eccf 0%,
+    #efdcae 55%,
+    #f8eccf 100%
   );
   /* Resting/default state = mask clipped away to nothing (scene fully visible),
      matching state.iris.radius's default of 1 ("fully open onto the scene").

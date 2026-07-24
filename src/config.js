@@ -71,6 +71,14 @@ export const RETURN_TOTAL_DURATION =
 
 export const SKIP_AFFORDANCE_DELAY = 2; // seconds before the skip control is allowed to appear
 
+// v2.16, NEW — where "home" actually is. The piece is a 404 page: after the iris/whiteout climax
+// the user MUST be offered a way onward (previously the experience simply stopped on the final
+// gold frame with no link anywhere — a literal dead end on the exact page whose one job is to
+// route lost visitors back). The ending's "Take me home" CTA (overlay-text.js) navigates here;
+// the skip button's own promise ("Skip to homepage") is fulfilled by the same CTA once the
+// skip-to-end lands on the ending frame.
+export const HOME_URL = '/';
+
 // v2.5 REPLACES v2.4's ROOM_SCENE — feedback: "I don't see the room/tv, I think it's better to
 // just use the image somewhere in the journey portal, a random shadow... staring at the 404 tv."
 // Two decisions this encodes: (1) use the user's actual reference photos (src/assets/
@@ -129,7 +137,22 @@ export const SKIP_AFFORDANCE_DELAY = 2; // seconds before the skip control is al
 export const VISION_ENCOUNTER = {
   count: 4,                 // deliberately few, spaced-apart glimpses — see comment above for why not 24 and not ending-only
   margin: 0.08,             // fraction of the traverse kept clear at the very start/end (same role as seeking-orbs.js's own margin)
-  axisOffset: 1.4,          // meters off the travel axis, lateral — tightened further from 2.2 (v2.7) for stronger, more consistent visibility across many repetitions
+  // v2.18: 1.4 -> 3.2. The successive tightenings (4.5 -> 2.2 -> 1.4) were all fixes for the
+  // encounter being HARD TO SEE — against a dim, cluttered box-field where it genuinely was. That
+  // problem is gone: v2.18's field is sparser and softer, the screen is 5.5m wide, and the plateau
+  // holds full opacity from 14m out. What's left at 1.4m is the opposite failure — the camera
+  // effectively drives THROUGH a near-opaque photograph, which fills the frame and reads as a
+  // collision rather than the "apparition glimpsed in passing" this encounter is specified to be
+  // (see peakOpacity's own note). Verified live: at 3.2m it still reads large and unmistakable at
+  // closest approach, but passes BESIDE the camera — a held moment, not a jump-scare.
+  // v2.21: 3.2 -> 5.7. The encounter is now ONE composite plane (see planeWidth below) instead of a
+  // 3.2m figure card plus a separate 5.5m screen card, and at planeWidth 9.13 its half-width (4.57m)
+  // would extend PAST the travel axis at a 3.2m offset — i.e. the camera would fly straight through
+  // the picture. Pushed out so the plane's near edge still clears the axis by ~1.1m (verified live:
+  // it passes BESIDE the camera, the "held moment, not a jump-scare" read v2.18 tuned for). 5.7m is
+  // still far inside plateauRadius (14m), so the encounter reaches full peak opacity exactly as
+  // before; what it does cost is closest-pass angular size — see planeWidth's own honest caveat.
+  axisOffset: 5.7,          // meters off the travel axis, lateral
   side: -1,                 // -1 = left of travel direction, +1 = right (alternates per encounter — see seeking-orbs.js-style side assignment in vision.js)
   heightOffset: -0.7,       // meters relative to eye height — a couch/figure sits low, this is looked slightly DOWN at, not levelly across from
   // v2.10 FIX — feedback: "the image fades in/out too fast, the user won't even understand what
@@ -157,8 +180,19 @@ export const VISION_ENCOUNTER = {
   plateauRadius: 14,        // meters — full peak-opacity zone, NEW: the fix for "fades too fast"
   approachRadius: 27,       // meters — the OUTER edge where opacity reaches 0 (widened again for "show up from further," right at the safe ceiling given current encounter spacing)
   peakOpacity: 0.92,        // never fully opaque even at closest approach — an apparition, not solid scenery
-  screenGlowColor: 0xff9a4d,  // warm ember glow behind the TV image, matching its own on-screen tone — the encounter's one light-emitting element, same "glow is unlit material color, never a THREE.Light" discipline as the rest of this codebase
-  screenGlowPeakOpacity: 0.5,
+  screenGlowColor: 0xe0a266,  // v2.17: pulled into the unified champagne family (was 0xff9a4d, a hotter orange) — warm ember glow behind the TV image, the encounter's one light-emitting element, same "glow is unlit material color, never a THREE.Light" discipline as the rest of this codebase
+  // v2.16 FIX — peak halo opacity lowered 0.5 -> 0.28 (paired with vision.js's glow-scale
+  // reduction, see screenGlowScale below): at 0.5 additive opacity across a 2.2x-screen-width
+  // sprite the halo rendered as a huge flat mud-brown disc that swallowed the whole encounter —
+  // the TV and silhouette lost all contrast inside it (verified live in-browser). The ember read
+  // survives at a much lower opacity because the glow is additive against near-black.
+  screenGlowPeakOpacity: 0.28,
+  // v2.16, NEW — halo diameter as a multiple of screenWidth (was a hardcoded 2.2 in vision.js,
+  // duplicated at construction and at texture-resolve). At 2.2x a 5.5m screen the halo spanned
+  // ~12m — wider than the tunnel's inner radius — which is what made it read as scene-filling
+  // mud rather than a glow hugging the screen. 1.35x keeps a visible soft ember rim just past
+  // the screen's own edge.
+  screenGlowScale: 1.35,
   // v2.7, NEW — feedback: "make the other orbs lively as well, and make them surround the
   // silhouette." A dedicated companion-orb behavior (owned by vortex.js's updateCompanionOrbs,
   // config'd here since it's this encounter's own contract) pulls a small cluster of the ambient
@@ -198,15 +232,58 @@ export const VISION_ENCOUNTER = {
   // the "box" — fixed in vision.js by giving the glow-halo the same shared radial-gradient falloff
   // texture every other glow effect in this codebase already uses (glow-sprite.js), so it fades to
   // transparent at its own edge instead of ending in a hard rectangular silhouette.
-  screenWidth: 5.5,
+  // v2.21 — ONE composite plane replaces the old silhouette-card + screen-card pair. The two cards
+  // sat 1.6m apart along the travel axis in a T, and the camera passes at a lateral offset, so
+  // parallax exposed the T as two flat photos rather than a scene; worse, the two assets were shot
+  // separately (the couch photo's figure is lit from the left and faces near-left, while the TV it
+  // is supposedly transfixed by sat behind and beside it), so the piece's single strongest image —
+  // a man who cannot look away from the 404 — was the one thing that staging could not show. The
+  // composite bakes gaze, light direction and depth into the pixels, where parallax cannot break
+  // them, and retires the luminance-keying pipeline entirely (see vision.js).
+  //
+  // planeWidth is set for PHYSICAL GLYPH-SIZE PARITY with the old build, which is the legibility
+  // metric that matters across most of the approach (the v2.15 note widened the old TV to 5.5m
+  // because a small screen "reads as a small bright rectangle, not a screen"). Measured directly off
+  // both files: the old asset's "404" is 69px of 363 (0.190 of its height) on a 5.5m-wide,
+  // 1.410-aspect plane = 0.741m tall. The composite's "404" is 86px of the cropped render's 1060px
+  // width, so glyph height = 0.741m at planeWidth 9.13.
+  //
+  // HONEST CAVEAT: parity is in METERS, not in on-screen angular size at closest pass. The plane is
+  // much wider than the old TV card, so axisOffset had to move out from 3.2m to 5.7m to keep the
+  // camera from flying through the picture (see axisOffset's own note), and glyph/distance at the
+  // closest point therefore drops from ~0.23 to ~0.13. Out where the encounter actually fades in
+  // and holds (plateauRadius 14m, approachRadius 27m) distance is dominated by the along-axis term,
+  // so the two are within a few percent there and the text reads exactly as before — it is only the
+  // closest-pass punch that is softer. Verified live in-browser at both encounters.
+  //
+  // The source render is CROPPED (scripts/prepare-vision-asset.py) rather than merely scaled for
+  // this exact reason: empty margin costs plane width, plane width forces axisOffset outward, and
+  // axisOffset is what shrinks the text. Scaling cannot break that loop — it grows the glyph and the
+  // plane's half-width in lockstep. Cropping the dead void is the only lever that does.
+  planeWidth: 9.13,
+  // Where the TV sits INSIDE the composite, as fractions of the plane's own width/height measured
+  // from its center (two different scalars — right scales width, up scales height). Measured off the
+  // cropped asset (1060x640): bezel center x = 800/1060 = 0.755, bezel center y = 217/640 = 0.339
+  // from the top, i.e. above center. Consumed by vision.js to park the glow halo on the TV rather
+  // than at the plane's center.
+  screenCenterOffset: { right: 0.255, up: 0.161 },
+  screenWidthFraction: 0.377, // TV bezel width as a fraction of the composite's width (400/1060) — the glow halo is sized off this, not off the whole plane
+  // v2.21, NEW — the plane's own opacity flicker, replacing the old positional CRT jitter. Jitter
+  // used to move the screen CARD, which was safe when the card was only a TV; the same offset
+  // applied to the composite would shake the couch and the man too. Same "unstable signal, not a
+  // vibrating prop" intent, expressed as a small brightness flutter instead of movement (the
+  // positional/rotational jitter below now drives the glow halo alone).
+  planeFlickerAmplitude: 0.06, // fraction of current opacity, +/-
   // v2.12, NEW — feedback: "add jittering effect to the tv screen." A CRT-static-style unsteady
   // image: small, fast, noise-driven positional/rotational jitter, sampled off
   // state.traverse.elapsedSeconds (never state.clockTime — frozen during traverse, per this
   // codebase's established "frozen-clock" rule, see guide.js's own bob-clock comment) so it never
   // stalls regardless of scroll speed/direction. Deliberately subtle (a few millimeters/a fraction
-  // of a degree) — reads as "unstable signal," not a shaking/vibrating prop.
+  // of a degree) — reads as "unstable signal," not a shaking/vibrating prop. v2.21: the positional
+  // jitter now drives the GLOW HALO only (the picture plane is the whole scene now — see
+  // planeFlickerAmplitude above), and the rotational channel is gone with the screen card it used
+  // to rotate; a camera-facing sprite has no meaningful roll to jitter.
   screenJitterAmplitude: 0.012, // meters — positional jitter magnitude
-  screenJitterRotationDeg: 0.6, // degrees — rotational jitter magnitude
   screenJitterSpeedHz: 9,      // how fast the noise field is sampled — fast enough to read as "static," not a slow wobble
 };
 
@@ -223,7 +300,12 @@ export const VISION_ENCOUNTER = {
 // but the piece still leans forward overall, never becoming a place you can get lost drifting
 // backward in.
 export const SCROLL = {
-  idleDriftDuration: 26,  // seconds to complete the traverse via idle-drift alone (zero input)
+  // v2.17: 26 -> 18 — direct feedback: "the scroll feels too long." The default (idle/gentle)
+  // pace now completes the journey ~30% sooner. minDuration below is deliberately NOT lowered:
+  // 10s is the verified arithmetic floor for all four traverse dialogue lines to fire and be
+  // readable at max scroll speed (see the v2.9 note on it) — the pacing win comes from the
+  // default pace, not from re-opening that bug.
+  idleDriftDuration: 18,  // seconds to complete the traverse via idle-drift alone (zero input)
   // v2.9 FIX — feedback: "we also need to ensure all the texts are rendered, and read by the
   // user... currently, if I scroll through too fast, I'm missing a lot of the texts." Raised from
   // 6 to 10. Verified directly (simulating the real dialogue trigger/queue/min-interval-floor
@@ -280,6 +362,28 @@ export const GUIDE = {
   // file importing the other (avoids the vortex.js<->guide.js circular-import hazard
   // ARCHITECTURE.md warns about) — config.js is a shared leaf module both already depend on.
   brightnessCeiling: 1.35 * 1.22,
+  // v2.18, NEW — THE ORB ACTUALLY CASTS LIGHT. Until now the Guiding Orb was a glow sprite
+  // floating IN FRONT OF the streak field, never interacting with it: the field's brightness had
+  // no idea the orb existed. That is the concrete reason "the lighting doesn't feel premium" —
+  // there was no lighting, only two independent layers of self-lit material. lighting.js can't
+  // solve this either (its ambient/hemi lights do nothing to the unlit MeshBasicMaterial and
+  // sprites everything here is built from — see that file's own header on why scene lights are
+  // deliberately absent).
+  //
+  // So the illumination is authored where the field's color already is: vortex.js's per-instance
+  // color write gains a proximity-to-orb term, warming and brightening threads near the orb and
+  // falling to nothing beyond castRadius. The orb now visibly moves a pool of warm light through
+  // the field as it leads — the single strongest "this is a real space with a real light in it"
+  // cue available in an unlit pipeline. The lift stays UNDER GUIDE.brightnessCeiling via the same
+  // clamp every other streak term already passes through, so the orb still reads as unambiguously
+  // the brightest thing in frame (a load-bearing non-negotiable).
+  // Verified live: at 14m the pool swallowed the entire foreground (the orb rides only ~3.5m
+  // ahead of the camera, so every near-camera thread fell inside it and the field lost its cool
+  // teal identity up close). 10m keeps the warm pool visibly AROUND the orb — which is what reads
+  // as a light source — while the foreground and mid-field stay teal.
+  castRadius: 10,        // meters — how far the orb's warm pool reaches into the streak field
+  castBrightnessGain: 1.5, // peak additional brightness multiplier for a thread right at the orb
+  castWarmth: 0.75,      // peak fraction a lit thread's hue is pulled toward the orb's own color
 };
 
 // v2.4, NEW — "A floating light-orb that feels like a soft light source in darkness, not a solid
@@ -400,7 +504,19 @@ export const CAMERA = {
     traverse: 60,    // Act II resting FOV
     approach: 70,    // cheats wider as light is neared, Act III
   },
-  rollDegrees: { min: 2, max: 4 },       // uncommanded roll during the fall
+  // v2.23 — THE FALL-IN TUMBLE IS REMOVED. v2.20 softened it (2-4° -> 1-2.2°) and it was still
+  // reported as jumpy, because the problem was never the amplitude — it was the SHAPE. The roll
+  // was tweened 0 -> max on `power4.in` across `drop`, which barely moves for most of that beat
+  // and then snaps almost the whole way in its final fraction of a second, and then immediately
+  // REVERSED direction toward `min` at the freefall boundary. Two velocity discontinuities back to
+  // back, right at the opening. Reducing the numbers just made a smaller jump.
+  //
+  // Zeroed rather than re-shaped: against v2.18's calm field there is nothing left for an
+  // uncommanded tumble to do except disturb an otherwise still frame. The fall now reads through
+  // the things that actually carry it — the accelerating descent, the streaks, and the FOV
+  // recalibration at `catch`. The tweens that write these values are left in place and simply
+  // animate 0 -> 0 (inert), so the timeline's structure and beat contract are untouched.
+  rollDegrees: { min: 0, max: 0 },       // uncommanded roll during the fall — retired, see above
   bankDegrees: { min: 1, max: 2 },       // occasional Act II roll/bank as the vortex curves
   eyeHeight: 1.6,                        // meters, human eye-level reference
 
@@ -449,9 +565,25 @@ export const CAMERA = {
 
 // Void/particle-vortex flow field.
 export const VORTEX = {
-  streakCount: 2400,        // instanced elongated-particle count for the primary Act II visual
-  streakLength: 3,          // meters, elongated to read as motion-blurred flow
-  streakWidth: 0.04,
+  // v2.18 — count cut 2400 -> 700 as PART OF the additive-quad swap (vortex.js's makeStreaks),
+  // not as a separate tuning choice. Two reasons, pointing the same way:
+  //   (a) Necessity: opaque boxes don't stack, additive quads do. At 2400 the near-axis band
+  //       would accumulate to a blown-out white wash no matter what the per-instance brightness
+  //       ceiling clamps, because the ceiling is per-streak and blow-out is a sum.
+  //   (b) Aesthetics: fewer, softer, larger-reading threads with real space between them is what
+  //       produces calm and negative space. A dense swarm reads as busy no matter how soft it is.
+  streakCount: 900,         // instanced elongated-particle count for the primary Act II visual
+  // v2.18: 3 -> 4.5m. Short threads read as sparks/scratches; long ones read as flowing silk,
+  // which is the reference image's whole character. Safe to change now that the visible depth
+  // window (vortex.js's STREAK_FAR_FADE_*) is authored independently rather than derived from
+  // STREAK_WRAP_SPAN — but STREAK_WRAP_SPAN itself still scales off this, so keep the far-fade
+  // end comfortably inside STREAK_WRAP_SPAN/2 if this grows a lot.
+  streakLength: 4.5,        // meters, elongated to read as motion-blurred flow
+  // v2.18: 0.03 -> 0.18. These are no longer solid sticks whose width IS their visible size —
+  // they're soft quads whose luminous core occupies only the middle ~40% of the quad, the rest
+  // dissolving to transparent. A 0.03 quad under that falloff is a barely-visible hairline; 0.18
+  // yields a thread that reads at tunnel distances while still looking like silk, not rope.
+  streakWidth: 0.18,
   tunnelRadiusMin: 2.5,      // meters, inner radius of the flow field around the travel axis
   tunnelRadiusMax: 14,       // meters, outer radius before particles fade/recycle
   travelSpan: 260,           // meters of "distance" the traverse phase covers along its axis
@@ -465,6 +597,81 @@ export const VORTEX = {
     periodSeconds: 22,    // one full slow evolution cycle
     intensityAmplitude: 0.12, // fraction of brightness the cycle modulates by
   },
+};
+
+// v2.20, NEW — HOW SCROLLING SHOULD FEEL. The authored answer to "what should the user feel while
+// scrolling," in one tunable place.
+//
+// THE PROBLEM: scroll was a throttle. Input went in, the camera moved, and nothing in the world
+// had an opinion about it. Mechanically correct, emotionally inert — you were operating a slider
+// attached to a dolly. Nothing about it said "you are travelling with someone."
+//
+// THE DESIGN — "the light answers you." Three interlocking responses, driven by scroll.js's
+// intent/stillness/impulse signals (see state.js's `scroll` block):
+//
+//  1. THE ORB ANSWERS (guide.js). Push, and the orb brightens and swells a little — a companion
+//     saying "yes, this way." It's a response, not a readout: small enough that you feel
+//     acknowledged rather than watch a meter move.
+//  2. STILLNESS IS REWARDED (guide.js + vortex.js). Stop scrolling, and the piece does not nag or
+//     stall — it SETTLES. The orb eases to a calmer, steadier glow; the companion orbs drift a
+//     little closer. Almost every scroll-driven experience punishes stopping; this one answers it.
+//     That inversion is the single most calming decision available here, and it's the literal
+//     content of the orb's own dialogue: "However long this takes you, it's exactly enough."
+//  3. YOU PUSH LIGHT INTO THE DARK (vortex.js). Every deliberate push releases a soft wave of
+//     light that travels forward down the tunnel and dissipates. It makes agency physical and
+//     visible: you are not scrolling a page, you are pushing back the dark, and the dark answers.
+//
+// Together these read as breathing: push and the world brightens ahead of you; rest and everything
+// gathers quietly back toward you. Every one of them is resonance-not-response compliant — each
+// decays fully to baseline on its own and none of them gate progress.
+export const SCROLL_FEEL = {
+  // --- 1. The orb's answer (guide.js) ---
+  orbResponseGlowGain: 0.22,  // peak extra brightness at full scroll intent. If the orb visibly "flashes" when you scroll, this is too high — it must read as a companion, never as a UI element.
+  orbResponseScaleGain: 0.09, // peak extra scale at full scroll intent
+  orbStillnessDim: 0.16,      // how far the orb settles back when the user rests
+
+  // --- 2. Stillness gathering (vortex.js) ---
+  stillnessGatherFraction: 0.35, // how far companion orbs drift toward the travel axis at full stillness (0 = no gathering, 1 = all the way in)
+  stillnessGatherLift: 0.35,     // extra brightness on gathered companions at full stillness — they lean in a little, so resting feels ANSWERED rather than merely quiet
+
+  // --- 3. Light waves (vortex.js) ---
+  waveSpeed: 52,          // meters/sec the wave front travels forward — fast enough to read as light, slow enough to watch it go
+  waveLifetimeSeconds: 1.6,
+  waveWidth: 7,           // meters — gaussian half-width of the bright band
+  waveGain: 0.85,         // peak brightness multiplier added at the wave's own crest
+  waveMaxActive: 4,       // concurrent waves; beyond this the oldest is recycled
+};
+
+// v2.19, NEW — the far depth layer (src/scene/starfield.js). Answers "should we add a lot of
+// granular details to make the outer space lively?" with a deliberate NO to the general version
+// and a YES to exactly one thing: a second, much more distant population, so the piece has real
+// parallax between depth bands instead of one populated band floating in empty black.
+//
+// Every value here is chosen to stay SUBORDINATE. These are the dimmest, smallest, slowest things
+// in the piece by a wide margin — they exist to make the dark feel inhabited, never to be looked
+// at. If this field ever becomes noticeable as "particles," it has failed; turn it down.
+// FIRST LIVE PASS FAILED, AND THE FAILURE IS INSTRUCTIVE — it is the very thing this field's
+// header warns about. At count 1100 / minRadius 26 / size 2.4 the stars rendered as a dense swarm
+// of clearly-visible soft blobs: granular detail that made the frame busy, exactly the outcome
+// that argued against "a lot of granular details" in the first place. Retuned by a lot, not a
+// little: far fewer, much further out, much smaller, much dimmer. The test is not "can I see the
+// stars" — it's "does the dark feel inhabited." If you can pick out individual particles, it is
+// still too strong.
+export const STARFIELD = {
+  count: 650,
+  minRadius: 55,          // meters from the travel axis — far outside VORTEX.tunnelRadiusMax (14); nothing should ever pass NEAR the camera, or it stops reading as distance
+  maxRadius: 170,
+  spanMarginBehind: 80,   // meters of star coverage behind the journey's start (the fall-in enters from here)
+  spanMarginAhead: 140,   // meters past VORTEX.travelSpan, so the return phase still flies through populated space
+  size: 1.0,              // world-units point size before perspective attenuation
+  baseOpacityMin: 0.06,   // deliberately very dim — far below the companion orbs, further below the Guide
+  baseOpacityMax: 0.22,
+  twinkleHzMin: 0.04,     // extremely slow — a star that visibly blinks reads as a UI element, not distance
+  twinkleHzMax: 0.14,
+  twinkleAmount: 0.22,    // +-22% brightness, well under the streak field's own breathing
+  colorCool: 0x9fc6d8,    // pale cold blue-white — the far, cold end of the piece's existing teal family
+  colorWarm: 0xffe3c0,    // a warm minority, drawn from the same champagne family as GUIDE.color
+  warmFraction: 0.22,
 };
 
 // v2.3, NEW — the journey is now a single continuous CURVED path (a real 3D spline), not a
@@ -518,7 +725,28 @@ export const PATH = {
 export const COLOR = {
   voidBase: 0x05070a,        // Act I: near-black, cold, never pure black
   traverseBase: 0x0a2a30,    // Act II: deep teal/cyan base (reference-image match)
-  traverseAccent: 0xffb347,  // warm amber "404" glyph-formation + accent color
+  // v2.16 FIX — the streak field's own particle color. The streaks previously reused
+  // `traverseBase` directly, but that value is authored as a near-black ENVIRONMENT base
+  // (luminance ~16%) — as an unlit particle color it renders essentially invisible, which left
+  // the warm amber accent minority as the only streaks the eye could register: the whole tunnel
+  // read as sparse brown/amber straw instead of the reference image's luminous teal-cyan vortex.
+  // Streaks need their own luminous member of the same hue family, bright enough to carry the
+  // field's teal identity on their own (verified live in-browser against the running build).
+  // v2.17 (calm/premium pass): softened from 0x2f9fae — the first luminous value read as
+  // electric/neon at full field density, which fought the "floating in a planetarium" tone
+  // guardrail. This sits in the same hue, lower saturation, gentler peak luminance: misty
+  // teal threads rather than charged wires. Easy on the eyes over a 20-30s stare.
+  // v2.18: saturation restored (0x4f939e -> 0x3d92a6). v2.17 desaturated this to calm an
+  // OPAQUE-box field that was reading harsh; under v2.18's additive blending + bloom the maths
+  // run the other way — accumulated light and bloom both pull perceived hue toward white, so a
+  // pre-desaturated base washes out to colorless scratches. Deeper input, calm output.
+  streakBase: 0x3d92a6,      // misty teal — the visible-particle sibling of traverseBase
+  // v2.17 (calm/premium pass): 0xffb347 -> 0xe9bc82 — the old accent was a saturated tangerine
+  // that clashed against both the misty teal field and the Guide's soft champagne (0xffd9a0).
+  // The whole warm family now sits in one champagne band: GUIDE.color (lightest) -> this accent
+  // -> VISION_ENCOUNTER.screenGlowColor (deepest), so every warm element reads as the same light
+  // at different intensities rather than three competing oranges.
+  traverseAccent: 0xe9bc82,  // champagne amber accent (aligned to GUIDE.color's family)
   overflowStart: 0x2a5550,   // pivot begins here (foreshadow, end of "Turn" beat) — teal-leaning, not violet-leaning
   overflowEnd: 0xfff4d6,     // warm gold/white bloom
   whiteout: 0xffffff,        // final overexposed frame before iris
@@ -606,11 +834,37 @@ export const GUIDE_DIALOGUE_MIN_PAUSE_AFTER_REVEAL_SECONDS = 0.6;
 // orb's own new light-in-the-dark visual language (GUIDE_LIGHT_FALLOFF above), not a hard-edged
 // UI chat bubble — so the dialogue reads unambiguously as the orb talking, a conversation
 // happening, rather than narration floating independently in space.
-export const SPEECH_BLOB = {
-  color: 0xffd9a0,        // same as GUIDE.color — the blob reads as coming from the same light
-  backgroundOpacity: 0.16, // soft, translucent fill — never a solid/opaque card
-  glowOpacity: 0.35,       // the blob's own soft outer glow, echoing GUIDE_LIGHT_FALLOFF's outer halo
-  cornerSoftnessPx: 46,    // large border-radius / soft-edge amount — irregular-soft, not a rounded rectangle chat bubble
+// v2.21 REPLACES SPEECH_BLOB (v2.4-v2.20) — the speech container is RETIRED.
+//
+// Feedback: "the text boxes don't fit the design taste." Correct, and the honest reading is that
+// this element had been failing for four rounds and was only ever sanded down instead of
+// questioned. Its history: the voice-marker dot was removed (v2.13), the inset ring and
+// backdrop-blur were removed because both traced its border-radius as a crisp pill edge (v2.16),
+// and its fill and glow were halved (v2.17). Every round removed another part of it, and it still
+// read wrong — because the problem was never the styling, it was that the element EXISTS.
+//
+// Seen at zoom against the v2.18+ field, it read as a disabled search input: a hard
+// rounded-rectangle silhouette with a rim highlight, darker inside than the scene, sitting ON the
+// frame. It was the only object in the entire piece with a defined edge — everything else
+// (streaks, orbs, stars, the guide) dissolves. Worse, because the container is sized to the
+// finished line, an empty bar sat waiting while the typewriter filled it, which is exactly what
+// makes it read as an input field rather than a voice.
+//
+// What replaces it is the piece's own established language: LIGHT EMERGING FROM DARK, NO EDGES.
+// The copy is now luminous text floating in the void, lit in the Guide's own colour, over a wide
+// shapeless pool of darkness that exists only for legibility and never resolves into a shape. The
+// "is this a conversation?" question that originally justified a container (v2.4) is already
+// answered by the typewriter reveal and the centred layout — neither of which existed back then.
+export const DIALOGUE_VOICE = {
+  color: 0xffd9a0,         // GUIDE.color — the words are lit by the same light that speaks them
+  textGlowOpacity: 0.5,    // inner halo on the glyphs themselves: the copy GLOWS rather than sitting on a lit panel
+  textGlowWideOpacity: 0.24, // a second, much wider halo — how light actually falls off, and what sells "spoken" rather than "printed"
+  // v2.22 — THE SCRIM IS GONE TOO. It went 0.55 (read as a dark oval, and banded) -> 0.32 (much
+  // better, but still a darkening the eye could locate) -> removed. There is now NO background of
+  // any kind behind any text in this piece: contrast lives entirely on the glyphs, via the warm
+  // inner halo plus a tight dark contact shadow. That is also what lets the typewriter reveal read
+  // as words being typed directly into the void rather than into a reserved area waiting for them.
+  // If legibility ever needs help, deepen the glyphs' own dark shadow — never add a panel back.
 };
 
 export const EASE = {

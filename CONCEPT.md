@@ -4,6 +4,237 @@ A choreography document, not a spec. Four lenses, then a creative director's syn
 
 ---
 
+## REVISION (v2.20) — A Clean Opening, and "The Light Answers You"
+
+*(Twentieth round. Two asks: "the initial camera movements feels off, it feels like it starts off
+very shaky," and "for the interactions, go nuts, get ultra creative to resolve how we should make
+the user feel while scrolling.")*
+
+### The shaky opening
+
+The fall-in's easing curve was `t²`, whose derivative at t=0 is exactly **zero** — the camera does
+not move at all for the first fraction of a second. Meanwhile director.js ramps camera roll in from
+frame one. A stationary frame with a rotation applied to it does not read as falling; it reads as
+wobbling in place.
+
+That also contradicted this document. Section 3 is explicit that "motion is continuous from t=0 —
+the felt goal is 'immediate,' not 'eventually gets going'." A pure square curve is exactly
+"eventually gets going." The curve is now a blend with a real non-zero initial velocity that still
+accelerates hard into the fall. The uncommanded roll was separately softened (2–4° → 1–2.2°): that
+range was authored for a much busier, harder-edged opening, and against v2.18's calm field it had
+become the loudest thing in the first two seconds.
+
+A third change is hygiene rather than a proven cause: the silhouette photo's alpha-keying ran a
+synchronous ~1.08-million-pixel loop on the main thread inside `img.onload`, which lands during the
+opening beats on a cold load. It's now sliced across idle callbacks so no frame absorbs more than a
+couple of milliseconds. **Honest caveat:** the frame-timing measurements taken while investigating
+this were invalid — the automated browser tab was backgrounded and Chrome was throttling it, so the
+"hitches" recorded were the measurement, not the app. The keying block is a real main-thread hazard
+worth removing on its own merits, but it should not be recorded as the confirmed cause of what was
+reported.
+
+### "The light answers you"
+
+Scrolling was a throttle. Input went in, the camera moved, and nothing in the world had an opinion
+about it — mechanically correct and emotionally inert. You were operating a slider attached to a
+dolly, which is the opposite of the piece's own premise that you are travelling *with* someone.
+
+Three interlocking responses now, all authored in one place (`config.js`'s `SCROLL_FEEL`):
+
+1. **The orb answers.** Push, and it brightens and swells slightly — a companion saying "yes, this
+   way." Deliberately rendered as brightness and scale rather than movement, so it can't fight the
+   chase-cam damping that exists to stop the orb reading as *you*.
+2. **Stillness is rewarded.** Stop scrolling and the piece doesn't nag or stall — it *settles*. The
+   orb eases to a calmer, steadier glow; the other travellers drift closer and lift slightly.
+   Almost every scroll-driven experience punishes stopping. Answering it instead is the calmest
+   move available here, and it is the literal content of the orb's own line: "However long this
+   takes you, it's exactly enough."
+3. **You push light into the dark.** Every deliberate push releases a soft wave of light that
+   travels forward down the tunnel and dissipates. It makes agency physical and visible — you are
+   not scrolling a page, you are pushing back the dark, and the dark answers.
+
+Together they read as breathing: push and the world brightens ahead of you; rest and everything
+gathers quietly back toward you. All three decay fully to baseline on their own and none of them
+gate progress, so "resonance not response" is intact.
+
+**What did NOT change:** scroll still only ever paces — never redirects, never gates. The
+three-act shape, guaranteed resolution, the single hard color pivot, and the orb-is-brightest
+non-negotiable all hold (see ARCHITECTURE.md for how the last one survives light waves).
+
+---
+
+## REVISION (v2.19) — One More Depth Layer, Not More Detail
+
+*(Nineteenth round. Question: "should we add a lot of granular details to make the outer space
+lively?" The answer, as creative director, was **no** — with one exception, which is what got
+built. The reasoning is the point of this entry.)*
+
+**Why not.** "A lot of granular detail" is what v2.18 just removed. The 2400-box field WAS granular
+detail, and it read as busy debris rather than as life. Under the additive rendering the piece now
+uses, more detail is actively worse than neutral: every added element brightens the frame, and the
+darkness is what makes an abyss feel like an abyss. Density has never been this piece's problem —
+the mid-field is already populated by the streak field, companion orbs (14, individually hued,
+with sighting and convergence behaviours), seeking-orb encounters, vision encounters, one-off
+ambient flares, a slow real-time living cycle, and regional density/warmth variation. Adding more
+things at that same distance would have bought busyness, not life.
+
+**What the question was right about.** The frame's outer thirds were pure empty black, so the piece
+read as *a tunnel in a void* rather than *a tunnel in a space*. That's a real gap — but the fix for
+it isn't more objects at the same depth, it's one more depth **layer**. The piece had exactly one
+populated distance band (2.5–14m). A far band at 55–170m gives the eye genuine parallax: near
+threads sweep past fast while far stars barely move, and that difference is what the brain reads as
+real three-dimensional space. One layer, large depth gain, almost no added agitation.
+
+**The new far field** (`src/scene/starfield.js`) is deliberately the dimmest, smallest, slowest
+thing in the piece. It is static (distant stars shouldn't recycle — and not recycling also
+sidesteps the wrap-seam bug class that bit the companion orbs twice), it fades out across the Act
+III pivot so it never leaves cool specks over a warm whiteout, and it sits behind the streak field
+in draw order.
+
+**The first live attempt failed, and the failure proved the point.** At the initially-authored
+density and size, the stars rendered as a swarm of clearly-visible soft blobs — exactly the busy
+granular detail the whole argument above rejects. Retuned by a large factor, not a small one:
+fewer, much further out, much smaller, much dimmer. The test to apply if this is ever touched is
+not "can I see the stars," it's **"does the dark feel inhabited"** — if individual particles are
+pickable, it's still too strong.
+
+---
+
+## REVISION (v2.18) — The Abyss Was Made of Boxes
+
+*(Eighteenth round. Feedback: "the lighting, the environment, all of these, doesn't feel premium,
+calming abyss experience?" — with an offer to re-choreograph the whole piece if needed. It wasn't
+needed, and this section records why, because that judgement is the most reusable thing here.)*
+
+**The root cause, and why two rounds of tuning couldn't touch it.** The abyss was 2400 opaque
+`BoxGeometry` sticks. A box has a hard silhouette; this renderer also runs `antialias: false`
+permanently (main.js documents the depth-blit crash that forbids enabling it), so every one of
+those silhouettes was *also* aliased. That is a **material/geometry** failure, and v2.16's palette
+work and v2.17's intensity work were both **color** interventions. No color value makes a
+hard-edged box read as light, mist, or atmosphere — which is exactly why the piece kept looking
+like floating debris no matter how carefully the palette was aligned. The lesson worth keeping:
+when two rounds of tuning a parameter don't move a problem, the problem is not that parameter.
+
+**What changed — a renderer swap inside the existing structure, not a new experience.** Every
+placement, twist, local-frame, curve, encounter, dialogue and camera system is untouched. Only how
+the field is *drawn* changed:
+
+1. **Threads of light instead of sticks.** Each streak is now an additively-blended quad carrying
+   a soft elongated gradient texture — no silhouette at all, dissolving into the void at its own
+   edges. Because a flat quad (unlike a square-section box) is not symmetric about its long axis,
+   each one now billboards around the flow direction: length pinned to the flow tangent, face
+   rotated to meet the camera. Still one `InstancedMesh` / one draw call.
+2. **Fewer, longer, softer.** 2400 → 900 threads, each longer (4.5m) and wider. Additive light
+   *accumulates* where opaque boxes didn't, so a high count would have washed to white; and fewer,
+   larger elements with real space between them is also simply what reads as calm. Necessity and
+   the aesthetic goal pointed the same way.
+3. **Actual depth.** Threads now fade out with distance as well as nearness, so the tunnel recedes
+   into darkness instead of ending at an invisible population boundary.
+4. **The void stopped being #000.** The renderer had always cleared to true black — the most
+   reliable tell of cheap-looking dark rendering. It now clears to `COLOR.voidBase`, the
+   near-black-but-cold value config.js had authored for exactly this purpose and nothing applied.
+5. **Bloom became a real lighting lever.** `lighting.js` is effectively inert for this piece (its
+   ambient/hemi lights do nothing to unlit materials and sprites), which makes bloom the only
+   lighting the environment has — and its threshold was set so high that, against the deliberately
+   dimmed v2.17 field, it essentially never fired. Lowered and heavily smoothed: the field finally
+   has light bleed.
+6. **The Guiding Orb actually casts light.** This is the round's biggest single win. The orb was a
+   glow sprite floating *in front of* the field; the field had no idea it existed. Threads near
+   the orb now take on its warmth and brightness with a soft falloff, so the orb visibly carries a
+   pool of warm light through the cool teal field as it leads. One warm source in a cool space,
+   with real falloff, is what "premium lighting" actually is — and it's now literally true rather
+   than implied. It stays under the orb's own brightness ceiling, so the orb remains the brightest
+   thing in frame.
+7. **The apparition is glimpsed again, not driven through.** The vision encounter sat 1.4m off the
+   travel axis — the end of a series of tightenings that were all fixes for it being hard to see
+   against the old cluttered field. Against the new one it was the opposite problem: the camera
+   effectively drove through a near-opaque 5.5m photograph. Moved to 3.2m, so it passes beside the
+   camera, large and unmistakable, as the held glimpse it was always specified to be.
+
+**What did NOT change:** the three-act shape, guaranteed resolution, the single hard color pivot,
+scroll pacing (deliberately — the "too long" fix from v2.17 stands; calm here comes from low
+visual agitation, never from slower travel), and every dialogue, encounter, and camera system.
+
+---
+
+## REVISION (v2.17) — Calm, Premium, One Warm Family, a Shorter Road
+
+*(Seventeenth round: a full design-language pass over the live build — goal: premium, color
+aligned, easy on the eyes, a felt sense of calm — plus direct feedback: "the scroll feels too
+long." Every change re-verified live in-browser. Read this first — older sections still apply
+except where noted here.)*
+
+1. **The journey is shorter by default.** `SCROLL.idleDriftDuration` 26s -> 18s (~30% faster at
+   the default/gentle pace). `minDuration` (10s) deliberately unchanged — it's the verified floor
+   below which the four traverse lines can't all be read (v2.9's arithmetic ceiling).
+2. **The field breathes instead of strobing.** Streak pulse amplitude ±45% -> ±24%, per-streak
+   brightness jitter tightened, speed-brightness and turn-cue boosts reduced. The trance act now
+   actually reads as trance.
+3. **Misty silk, not electric wire.** `COLOR.streakBase` softened (0x2f9fae -> 0x4f939e, same hue,
+   lower charge) and streak width 0.04 -> 0.03 — fine luminous threads, easy on the eyes over a
+   20-30s stare.
+4. **One warm family.** The three competing oranges (accent 0xffb347, screen glow 0xff9a4d, guide
+   0xffd9a0) are now one champagne band anchored on the Guide's own color: accent 0xe9bc82,
+   screen glow 0xe0a266. Every warm element reads as the same light at different intensities.
+5. **Quieter text chrome.** Dialogue type slightly smaller, wider-tracked, more open leading;
+   scrim lightened; blob fill/glow reduced — light gathering faintly around a voice, not a
+   highlighted UI region. Film grain 0.08 -> 0.05.
+6. **The whiteout no longer glares.** Iris gradient stepped down from full-brightness gold to a
+   softer cream — still warm overexposure after the dark, no longer painful to dark-adapted eyes.
+
+**What did NOT change:** the three-act shape, guaranteed resolution, the single hard color pivot,
+all trigger/hold/placement machinery, and every v2.16 fix are untouched. This round changes only
+intensity, saturation, weight, and pace — the piece's structure is stable.
+
+---
+
+## REVISION (v2.16) — The Field Made Luminous, the Voice Made Clean, a Way Home
+
+*(Sixteenth round: a full creative-director pass over the live running build — every phase walked
+end-to-end in a real browser, screenshots at every beat, each fix re-verified live afterward. Read
+this first — older sections still apply except where noted here.)*
+
+1. **The vortex finally looks like the reference.** The streak field was coloring its particles
+   with the near-black *environment* base (`COLOR.traverseBase`), so the teal majority of the
+   field was essentially invisible — only the warm amber accent minority registered, and the whole
+   tunnel read as sparse brown straw instead of a luminous teal-cyan vortex. Streaks now have
+   their own authored luminous color (`COLOR.streakBase`), same hue family, bright enough to carry
+   the field's identity. Verified live: the tunnel now reads as the reference image's cyan vortex.
+2. **No more giant planks.** A streak passing within a meter or two of the camera projected as an
+   enormous opaque bar slicing across the whole frame. Streaks now fade out (scale + color,
+   smoothstepped over 1.2–5m) as they near the camera.
+3. **The vision encounter is no longer drowned in mud.** The TV's glow-halo was 2.2x the screen's
+   width at 0.5 additive opacity — a ~12m flat brown disc that swallowed the TV and silhouette
+   both. Now 1.35x at 0.28: a tight ember rim; the TV reads crisply and the silhouette is finally
+   legible against it.
+4. **The speech blobs no longer read as a login form.** Two bugs and one styling flaw: (a) the two
+   opening lines' blob wrappers were never seeded hidden (only their characters were), so line 2's
+   empty glowing pill sat on screen for seconds before its text typed — each line's blob now
+   appears only as its own line starts speaking; (b) the blob's inset glow ring and hard-clipped
+   backdrop-blur both traced the border-radius as a crisp pill outline — both removed, leaving
+   only soft outward halos; (c) when line 2 begins, line 1 settles back to a supporting weight so
+   the exchange reads as one voice moving on.
+5. **The opening copy is restored.** The shipped line had silently become "You're lost. it's a
+   very human thing." — dropping "That happens —" (the clause that does the actual validating) and
+   leaving a lowercase typo. Restored to the authored line.
+6. **The title card no longer sits on the orb, and no longer assembles from noise.** Moved from
+   42% to 30% viewport height (clear of the orb's on-screen band), and its reveal is now
+   left-to-right (was `from: 'random'`, which mid-reveal read as garbled text) — the same
+   typewriter language as every other text in the piece.
+7. **The ending finally goes somewhere.** This is a 404 page, and it dead-ended: after the
+   iris/whiteout the user was stranded on the final gold frame with no link anywhere (the skip
+   button — aria-labeled "Skip to homepage" — merely fast-forwarded to that same dead end, then
+   faded out; it also strobed half-visible there due to a reveal/recede toggle loop, now fixed).
+   A quiet "Take me home →" anchor (`HOME_URL`, config.js) now assembles beneath "Welcome back."
+   once the iris settles — the piece's actual job, routing a lost visitor onward, completed.
+
+**What did NOT change:** the three-act shape, guaranteed resolution, the single hard color pivot
+(streakBase is a brightness/legibility fix inside the existing teal family, not a palette change),
+scroll pacing, dialogue triggering/hold machinery, encounter placement/timing, and every
+alpha-keying decision are all untouched.
+
+---
+
 ## REVISION (v2.15) — A Real TV, Not a Photo of One
 
 *(Fifteenth round of playtest feedback, on the built v2.14 experience. Read this first — older sections still apply except where noted here. Applied via direct hand-edits, verified via a hand-rolled PNG decoder against both the old and new shipped assets, and via direct execution of the real vision.js module end-to-end against the new asset, not assumed.)*

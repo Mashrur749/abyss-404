@@ -200,11 +200,27 @@ export function createDirector(state) {
   fallInTimeline.to(
     state.camera,
     {
-      fov: CAMERA.fov.catchEnd,
       rollDeg: 0,
       bankDeg: 0,
       duration: fallInBeatDuration('catch'),
       ease: EASE.overflow, // power2.out: a decelerating settle, the "exhale"
+    },
+    BEATS.catch.start
+  );
+  // v2.23 — FOV split into its own tween so it can carry a zero-velocity ramp. This is the SAME
+  // bug v2.14 already found and fixed at the two return-phase beat boundaries, present here too
+  // and never caught: FOV holds constant at 100 through `drop` and `freefall`, then at `catch` a
+  // plain `power2.out` starts moving it at that curve's own (non-zero) initial speed. A field that
+  // was motionless for 2.2s beginning a 40-degree change at full speed in a single frame is an
+  // instantaneous velocity discontinuity — it reads as a lurch or a zoom-snap right as the fall is
+  // supposed to be exhaling into flight, and it was part of what made the opening feel jumpy.
+  // zeroVelocityRamp accelerates the FOV into that same curve from a standstill instead.
+  fallInTimeline.to(
+    state.camera,
+    {
+      fov: CAMERA.fov.catchEnd,
+      duration: fallInBeatDuration('catch'),
+      ease: zeroVelocityRamp('power2.out'),
     },
     BEATS.catch.start
   );

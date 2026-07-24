@@ -89,7 +89,7 @@
 // (overlay-text.js), per this file's own module-boundary contract above.
 
 import * as THREE from 'three';
-import { GUIDE, GUIDE_LIGHT_FALLOFF, BEATS, COLOR, PULSE } from '../config.js';
+import { GUIDE, GUIDE_LIGHT_FALLOFF, BEATS, COLOR, PULSE, SCROLL_FEEL } from '../config.js';
 import { getFallInAxialPosition, getFallInAxialTangent } from './vortex.js';
 
 const FORWARD = new THREE.Vector3(0, 0, -1); // matches vortex.js's fixed travel direction
@@ -143,6 +143,13 @@ const BOB_FREQUENCY_HZ = 0.07;
 // STREAK_BRIGHTNESS_CEILING, also in config.js) — the two files stay in sync against one shared,
 // live constant instead of this comment's own periodically-stale guess.
 const GUIDE_BRIGHTNESS = 1.35;
+
+// v2.20 — the orb's response gains live in config.js's SCROLL_FEEL block alongside the rest of
+// the interaction design (see there for the full rationale), so how scrolling FEELS is tunable
+// from one place rather than split across the modules that happen to realize it.
+const ORB_RESPONSE_GLOW_GAIN = SCROLL_FEEL.orbResponseGlowGain;
+const ORB_RESPONSE_SCALE_GAIN = SCROLL_FEEL.orbResponseScaleGain;
+const ORB_STILLNESS_DIM = SCROLL_FEEL.orbStillnessDim;
 
 // --- v2.3: the pulsing GLOW (playtest: "the orb needs to glow, animated, living") -------------
 // Brightness oscillation independent of the position bob, tied to state.pulse.bpm — the same
@@ -535,7 +542,29 @@ export function updateGuide(handle, state, dt) {
         ? (state.actIII?.clockTime ?? 0)
         : (state.clockTime ?? 0);
   handle.bobPhase = bobClock * BOB_FREQUENCY_HZ * Math.PI * 2;
-  group.position.y += Math.sin(handle.bobPhase) * GUIDE.bobAmplitude;
+  // v2.23 — THE SOURCE OF THE CAMERA TWIST IN THE OPENING.
+  //
+  // The orb's bob and weave were running at full amplitude from frame zero, and during the fall
+  // that is geometrically dangerous in a way it never is during the traverse. The fall descends
+  // ~34m while advancing only ~6m, so the camera's view direction sits about 0.985 parallel to
+  // world-up — and `camera.lookAt()` derives its roll from the cross product of the view direction
+  // with world-up, whose magnitude here is only ~0.17. A 0.35m lateral weave perturbs that small
+  // horizontal component enormously in RELATIVE terms, so the derived roll swings: the camera
+  // visibly twists about its own view axis. Nothing was rolling the camera on purpose (the
+  // authored roll is zeroed as of this same round) — the twist was this amplification.
+  //
+  // Fixed at the source rather than by fighting it downstream: the orb's "living" motion now ramps
+  // in across the fall instead of being live during it. It was always authored as a traverse
+  // quality ("a barely-perceptible living drift" while it leads you) — during a 3-second plummet
+  // there is nothing for it to express, and it was the one thing destabilising the shot.
+  const livingAmplitude =
+    beat === 'drop' || beat === 'freefall'
+      ? 0
+      : beat === 'catch'
+        ? THREE.MathUtils.clamp(state.beatProgress ?? 0, 0, 1) // eases in exactly as the fall becomes flight
+        : 1;
+
+  group.position.y += Math.sin(handle.bobPhase) * GUIDE.bobAmplitude * livingAmplitude;
 
   // --- v2.3: lateral weave/drift, on top of whatever the curved path itself already supplies ------
   // CONCEPT.md v2.3 item 3 / ARCHITECTURE.md's guide.js section: "add a small amount of lateral
@@ -566,7 +595,9 @@ export function updateGuide(handle, state, dt) {
     .copy(_weaveRight)
     .multiplyScalar(lateralWeave * WEAVE_LATERAL_AMPLITUDE)
     .addScaledVector(WORLD_UP, verticalWeave * WEAVE_VERTICAL_AMPLITUDE);
-  group.position.add(_weaveOffset);
+  // v2.23: scaled by the same fall-in ramp as the bob above — the lateral term is the one that
+  // was actually amplified into camera roll, so this is the load-bearing half of that fix.
+  group.position.addScaledVector(_weaveOffset, livingAmplitude);
 
   // --- The handoff: dissolve into the Act III overflowLight starting at 'turn' -------------------
   // Non-negotiable #8 / GUIDE.dissolveStartBeat: the orb appears once, at the start, and hands off
@@ -628,10 +659,37 @@ export function updateGuide(handle, state, dt) {
     // v2.5: the orb is fully present at its own resting scale/opacity/color from the very first
     // frame of `drop` — the v2.4 ignition-from-the-screen blend that used to gate this has been
     // removed (see this file's header comment).
+    // --- v2.20: THE ORB ANSWERS YOU -----------------------------------------------------------
+    // The interaction premise of this piece is that you are travelling WITH a companion, not
+    // operating a camera. Until now nothing about the orb changed when the user scrolled, so
+    // scrolling read as working a throttle: input went into the world, and the world's one
+    // character had no opinion about it. These two terms make the orb respond to the user's
+    // intent, which is what turns pacing into something closer to a conversation.
+    //
+    //  - RESPONSE (intent): when you push, the orb brightens and swells slightly — a companion
+    //    saying "yes, this way." Rendered as brightness+scale rather than motion, deliberately:
+    //    moving it would fight the chase-cam's own damping (the v2.4 "it feels like the orb is
+    //    ME" fix) and re-couple the two.
+    //  - SETTLING (stillness): when you stop, it does NOT keep performing. It eases DOWN to a
+    //    calmer, steadier glow and waits with you. Most scroll experiences punish stopping;
+    //    rewarding it is the whole thematic content of this piece ("However long this takes you,
+    //    it's exactly enough"), and it is the calmest possible answer to "what should the user
+    //    feel while scrolling."
+    //
+    // Both stay strictly inside GUIDE.brightnessCeiling's budget — RESPONSE_GAIN is applied to the
+    // pulse term, whose ceiling config.js already accounts for, and settling only ever reduces.
+    const intent = THREE.MathUtils.clamp(state.scroll?.intent ?? 0, 0, 1);
+    const stillness = THREE.MathUtils.clamp(state.scroll?.stillness ?? 0, 0, 1);
+    const responseGlow = 1 + intent * ORB_RESPONSE_GLOW_GAIN;
+    // Settling narrows the pulse toward its own midpoint (a steadier, quieter breath) rather than
+    // simply dimming — a companion at rest still glows, it just stops reaching.
+    const settledPulse = THREE.MathUtils.lerp(pulseGlow, 1 + (pulseGlow - 1) * 0.35, stillness);
+    const settledDim = 1 - stillness * ORB_STILLNESS_DIM;
+
     group.visible = true;
     _frameColor.copy(_guideColor);
-    _frameColor.multiplyScalar(GUIDE_BRIGHTNESS * pulseGlow);
-    group.scale.setScalar(1);
+    _frameColor.multiplyScalar(GUIDE_BRIGHTNESS * settledPulse * responseGlow * settledDim);
+    group.scale.setScalar(1 + intent * ORB_RESPONSE_SCALE_GAIN);
     setGlowAppearance(handle, _frameColor, 1);
   } else {
     // approach / overflow / iris, reached without ever having passed through the dissolve branch
